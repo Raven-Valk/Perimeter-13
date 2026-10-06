@@ -1,6 +1,5 @@
-# Keys and passwords: never commit these
 secrets.h
+events_*.csv
 
-# Build and cache files
 __pycache__/
 *.pyc

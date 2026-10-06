@@ -8,8 +8,35 @@ The version numbers here are the final ones. During development some versions ha
 
 | Version | Date | What changed | Working name |
 |---|---|---|---|
+| [`v3`](#v3) | 2026-10-06 | one controller board with both PIRs + listen-only gateway to the PC | Pinnacle13_Firmware_v4 (first) |
 | [`v2`](#v2) | 2026-10-06 | teammate's single-board draft (draft2.ino) | draft2.ino |
 | [`v1`](#v1) | 2026-10-05 | two-node firmware (main controller + sensor node over ESP-NOW) | Pinnacle13_Firmware |
+
+## v3
+
+*2026-10-06* · one controller board with both PIRs + listen-only gateway to the PC · worked on as Pinnacle13_Firmware_v4 (first)
+
+Merges the teammate's draft (v2) with the two-node firmware (v1). Board 1 now holds both PIRs, the tamper switch, RFID, keypad, LCD, LEDs, buzzer and all the logic. A second ESP32 is a gateway on the PC's USB that only carries signed copies of the log and status to the PC.
+
+**From the teammate's draft (v2)**
+
+- Code split into parts (ZoneSensor, TamperSensor, Display, RfidReader, GatewayLink).
+- Full state saved on every change: INTRUSION and TAMPER survive a power cut.
+- Time-based tamper debounce; an open lid and a cut wire both alarm; can't arm with the lid open.
+- Distinct buzzer patterns per alarm; an unknown state fails closed; PIN masked and never printed.
+
+**Kept from v1**
+
+- Card + PIN for every login, 2 roles; P1 warning vs P2 confirmed (both sides, or 3 hits on one side).
+- PIR warm-up, stuck and unplugged detection; lockout 60/120/240 s that survives a reboot.
+- Maintenance mode with a 5-minute timeout; RECOVERY self-check before re-arming; salted PIN hashes; event log in flash.
+
+**New in v3**
+
+- Gateway to PC link with signed status and log lines; log lines numbered so lost packets show as GAP.
+- pc_logger.py adds real date and time to the log.
+- The gateway only listens: the PC can't control the alarm.
+- Draft problems fixed: keypad off input-only pins, PIR pull-ups, RFID glitch can no longer arm, tamper watched in every state, watchdog applied.
 
 ## v2
 
