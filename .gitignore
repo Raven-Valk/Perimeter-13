@@ -1,4 +1,6 @@
+# Keys and passwords: never commit these
 secrets.h
 
+# Build and cache files
 __pycache__/
 *.pyc
