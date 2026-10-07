@@ -8,9 +8,30 @@ The version numbers here are the final ones. During development some versions ha
 
 | Version | Date | What changed | Working name |
 |---|---|---|---|
+| [`v3.1`](#v31) | 2026-10-07 | Wokwi simulation of the controller and gateway, bench tools | Pinnacle13_Firmware_v4 + Wokwi |
 | [`v3`](#v3) | 2026-10-06 | one controller board with both PIRs + listen-only gateway to the PC | Pinnacle13_Firmware_v4 (first) |
 | [`v2`](#v2) | 2026-10-06 | teammate's single-board draft (draft2.ino) | draft2.ino |
 | [`v1`](#v1) | 2026-10-05 | two-node firmware (main controller + sensor node over ESP-NOW) | Pinnacle13_Firmware |
+
+## v3.1
+
+*2026-10-07* · Wokwi simulation of the controller and gateway, bench tools · worked on as Pinnacle13_Firmware_v4 + Wokwi
+
+Same firmware as v3, plus a simulator mode so the whole system can be shown in Wokwi, and two bench tools for the hardware build.
+
+**Simulator mode (WOKWI_SIM 1)**
+
+- Wokwi can't do ESP-NOW between two simulations, so the same signed packets travel over MQTT on a public broker instead (simulator only; real boards ignore it).
+- Shorter PIR warm-up (5 s) and a longer gateway timeout in the simulator; the buzzer uses tone().
+
+**Wokwi projects (Wokwi/)**
+
+- Board 1 controller and the gateway, each with diagram.json, libraries and a single-file sketch.
+
+**Bench tools**
+
+- Tools/RFID_Card_Reader: prints each card's UID ready to paste into secrets.h (ESP32 or Arduino Uno).
+- docs/diagrams/PIR_breadboard: breadboard wiring for testing the PIRs.
 
 ## v3
 

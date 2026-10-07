@@ -40,7 +40,15 @@ struct User {
 };
 #include "secrets.h"
 
+// The Arduino IDE / Wokwi auto-insert function prototypes above the first
+// function in this file. Declare our own types before that point so those
+// prototypes compile (e.g. "ZoneSensor* findZone(uint8_t id);").
+class ZoneSensor;
+
 #define ENROLL_MODE 0   // 1 = print full card UIDs on Serial (setup only). Keep 0 for the demo.
+#define WOKWI_SIM   0   // 1 = running in the Wokwi simulator: buzzer uses tone(), PIR warm-up 5 s,
+                        //     and the gateway link uses MQTT instead of ESP-NOW.
+                        // Keep 0 on the real board.
 
 // =====================================================================
 //  PINS — ESP32 DevKitC 38-pin (WROOM-32). Check against your board's labels.
@@ -69,13 +77,13 @@ const uint8_t LCD_ADDR            = 0x27;  // try 0x3F if the LCD stays blank
 //  TIMING / LIMITS  (finalise at Design Review 1)
 // =====================================================================
 const uint32_t LOOP_MS             = 50;
-const uint32_t PIR_WARMUP_MS       = 60000;
+const uint32_t PIR_WARMUP_MS       = WOKWI_SIM ? 5000 : 60000;
 const uint32_t SENSOR_MAX_ACTIVE_MS= 30000;   // active longer = stuck / disconnected / blocked
 const uint32_t TAMPER_DEBOUNCE_MS  = 60;
 const uint32_t CORROBORATION_MS    = 20000;   // P1 window from the first trigger
 const uint8_t  REPEAT_TRIGGERS     = 3;       // same side this often in the window = P2
 const uint32_t STATUS_EVERY_MS     = 1000;
-const uint32_t GATEWAY_TIMEOUT_MS  = 3000;
+const uint32_t GATEWAY_TIMEOUT_MS  = WOKWI_SIM ? 8000 : 3000;   // MQTT via internet is slower
 const uint8_t  MAX_ATTEMPTS        = 3;
 const uint32_t BASE_LOCKOUT_S      = 60;      // 60, 120, 240, 480, 960
 const uint8_t  MAX_LOCKOUT_LEVEL   = 4;
@@ -290,6 +298,16 @@ RfidReader rfid;
 uint32_t chirpUntil = 0, outputTestUntil = 0;
 void chirp(uint32_t ms) { chirpUntil = millis() + ms; }
 
+// Real board: active buzzer = steady ON/OFF. Wokwi's buzzer needs a tone.
+void setBuzzer(bool on) {
+#if WOKWI_SIM
+  static bool was = false;
+  if (on != was) { was = on; if (on) tone(PIN_BUZZER, 2000); else noTone(PIN_BUZZER); }
+#else
+  digitalWrite(PIN_BUZZER, BUZZER_ACTIVE_LOW ? !on : on);
+#endif
+}
+
 void updateOutputs() {
   uint32_t now = millis();
   bool fast = (now / 250) % 2, slow = (now / 500) % 2, beat = (now / 1000) % 2;
@@ -310,7 +328,7 @@ void updateOutputs() {
   digitalWrite(PIN_LED_GREEN, g);
   digitalWrite(PIN_LED_RED, r);
   digitalWrite(PIN_LED_YELLOW, y);
-  digitalWrite(PIN_BUZZER, BUZZER_ACTIVE_LOW ? !buz : buz);
+  setBuzzer(buz);
 }
 
 // =====================================================================
@@ -337,6 +355,19 @@ struct RxItem { int len; uint8_t data[sizeof(LinkPacket)]; };
 QueueHandle_t rxQueue;
 const uint8_t BROADCAST[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
 
+#if WOKWI_SIM
+// ---- Simulator transport: MQTT over Wokwi's internet (replaces ESP-NOW) ----
+#include <PubSubClient.h>
+WiFiClient   mqttNet;
+PubSubClient mqtt(mqttNet);
+void onMqtt(char* topic, byte* payload, unsigned int len) {
+  RxItem it;
+  it.len = len;
+  memcpy(it.data, payload, min((int)len, (int)sizeof(it.data)));
+  xQueueSend(rxQueue, &it, 0);
+}
+#endif
+
 #if ESP_ARDUINO_VERSION_MAJOR >= 3
 void onRecv(const esp_now_recv_info_t* info, const uint8_t* data, int len) {
 #else
@@ -354,6 +385,16 @@ public:
     bootId = esp_random();
     resetReason = (uint8_t)esp_reset_reason();
     rxQueue = xQueueCreate(8, sizeof(RxItem));
+#if WOKWI_SIM
+    WiFi.mode(WIFI_STA);
+    WiFi.begin("Wokwi-GUEST", "", 6);            // Wokwi's simulated Wi-Fi
+    mqtt.setServer(MQTT_BROKER, MQTT_PORT);
+    mqtt.setCallback(onMqtt);
+    mqtt.setBufferSize(512);
+    mqtt.setSocketTimeout(2);
+    ready = true;
+    return;
+#endif
     WiFi.mode(WIFI_STA);
     WiFi.disconnect();
     esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
@@ -378,6 +419,19 @@ public:
 
   void loop(uint32_t now) {
     if (!ready) return;
+#if WOKWI_SIM
+    if (WiFi.status() == WL_CONNECTED && !mqtt.connected() && now - lastMqttTry > 5000) {
+      lastMqttTry = now;
+      esp_task_wdt_reset();
+      String id = "p13-ctrl-" + String(bootId, HEX);
+      if (mqtt.connect(id.c_str())) {
+        if (!mixedBootId) { bootId ^= (uint32_t)micros(); mixedBootId = true; }   // simulator RNG may repeat
+        mqtt.subscribe(MQTT_TOPIC_GW);
+        Serial.println("[sim] MQTT connected");
+      }
+    }
+    mqtt.loop();
+#endif
     receive();
     if (online && now - peer.lastHeard > GATEWAY_TIMEOUT_MS) {
       online = false;
@@ -387,7 +441,7 @@ public:
       lastStatus = now;
       String st = statusText();
       send(++beats % 10 == 1 ? L_HELLO : L_STATUS, st.c_str(), 0);
-    } else if (count > 0) {
+    } else if (count > 0 && linkUp()) {         // keep lines queued while the link is down
       send(L_LOG, q[head], qNo[head]);
       head = (head + 1) % QSIZE; count--;
     }
@@ -402,7 +456,15 @@ private:
   uint32_t logNo = 0, bootId = 0, seq = 0, beats = 0, lastStatus = 0, lastRejectLog = 0;
   uint8_t  resetReason = 0;
   bool     ready = false;
+  uint32_t lastMqttTry = 0;
+  bool     mixedBootId = false;
   PeerTracker peer;
+
+#if WOKWI_SIM
+  bool linkUp() { return mqtt.connected(); }
+#else
+  bool linkUp() { return true; }
+#endif
 
   void send(uint8_t type, const char* text, uint32_t no) {
     LinkPacket p = {};
@@ -412,7 +474,11 @@ private:
     size_t n = strnlen(text, LINK_TEXT_MAX);
     memcpy(p.text, text, n); p.textLen = n;
     linkSign(SHARED_KEY, sizeof(SHARED_KEY), p, p.sig);
+#if WOKWI_SIM
+    if (mqtt.connected()) mqtt.publish(MQTT_TOPIC_CTRL, (const uint8_t*)&p, sizeof(p));
+#else
     esp_now_send(BROADCAST, (const uint8_t*)&p, sizeof(p));
+#endif
   }
 
   void reject(const String& why) {
@@ -927,7 +993,7 @@ void setup() {
   display.begin();
   rfid.begin();
   gateway.begin();
-  startWatchdog(5000);
+  startWatchdog(WOKWI_SIM ? 20000 : 5000);   // sim: MQTT connect can take a few seconds
 
   Serial.printf("\nBoard 1 controller, MAC %s\n", WiFi.macAddress().c_str());
   logEvent("SYSTEM", String("Boot #") + bootNo + " reason=" + resetReasonName(esp_reset_reason()) +

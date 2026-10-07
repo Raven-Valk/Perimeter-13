@@ -12,6 +12,15 @@
 #define SIG_LEN         8      // bytes of HMAC-SHA256 kept in each packet
 #define LINK_TEXT_MAX   160    // one log line / status line
 
+// Wokwi simulator only (WOKWI_SIM 1): Wokwi cannot do ESP-NOW between two
+// simulations, so the same signed packets travel over MQTT instead.
+// Both boards must use the SAME topic. Real hardware ignores these.
+#define MQTT_BROKER      "broker.hivemq.com"
+#define MQTT_PORT        1883
+#define MQTT_TOPIC_BASE  "pinnacle13/p13-2d386efc"
+#define MQTT_TOPIC_CTRL  MQTT_TOPIC_BASE "/ctrl"     // controller -> gateway
+#define MQTT_TOPIC_GW    MQTT_TOPIC_BASE "/gw"       // gateway -> controller
+
 enum LinkNode : uint8_t { NODE_CONTROLLER = 1, NODE_GATEWAY = 9 };
 enum LinkType : uint8_t {
   L_HELLO  = 1,   // "I (re)started" + carries status/ack. Sent at boot and every 10th beat.
