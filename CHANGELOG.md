@@ -8,10 +8,35 @@ The version numbers here are the final ones. During development some versions ha
 
 | Version | Date | What changed | Working name |
 |---|---|---|---|
+| [`v4`](#v4) | 2026-10-08 | sensor module firmware for two identical modules (A, B) | v5 (SensorModule) |
 | [`v3.1`](#v31) | 2026-10-07 | Wokwi simulation of the controller and gateway, bench tools | Pinnacle13_Firmware_v4 + Wokwi |
 | [`v3`](#v3) | 2026-10-06 | one controller board with both PIRs + listen-only gateway to the PC | Pinnacle13_Firmware_v4 (first) |
 | [`v2`](#v2) | 2026-10-06 | teammate's single-board draft (draft2.ino) | draft2.ino |
 | [`v1`](#v1) | 2026-10-05 | two-node firmware (main controller + sensor node over ESP-NOW) | Pinnacle13_Firmware |
+
+## v4
+
+*2026-10-08* · sensor module firmware for two identical modules (A, B) · worked on as v5 (SensorModule)
+
+Start of the new architecture: two identical sensor modules (A and B, one sketch with MODULE_ID) that each detect, decide and sound on their own, and a separate gateway control box (next step). This version is the sensor module firmware.
+
+**Sensor modules A and B**
+
+- WALL PIR along the wall towards the other module, SIDE PIR along its own side wall; tamper switch, buzzer, 3 LEDs, LCD, keypad.
+- P2 when, within 20 s: both WALL PIRs, or a module's WALL + SIDE PIRs, or one PIR 3 times. Both modules sound.
+- Arm, disarm and maintenance only by signed commands from the gateway; the module still checks the role and its own state (never arms with the lid open or a PIR stuck).
+- Any valid PIN on the module keypad silences that module; 3 wrong PINs lock the keypad (60, 120, 240 s), and the lockout survives a restart.
+- Keeps detecting and sounding if the gateway or the other module goes offline.
+
+**Radio security (protocol v3)**
+
+- A separate key for each link; HMAC-SHA256 on every packet; ESP-NOW encryption per link once the MAC addresses are set; MAC allow-list.
+- Boot counter and sequence numbers: replays, stale commands after a restart and old HELLOs are refused.
+
+**Tests and simulation**
+
+- PC protocol tests (signatures per link, tampering in transit, replay, stale commands, key derivation).
+- Wokwi project for one sensor module with bench commands.
 
 ## v3.1
 

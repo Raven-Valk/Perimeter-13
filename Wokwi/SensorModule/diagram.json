@@ -4,7 +4,7 @@
   "editor": "wokwi",
   "parts": [
     {
-      "type": "wokwi-esp32-devkit-v1",
+      "type": "board-esp32-devkit-c-v4",
       "id": "esp",
       "top": 0,
       "left": 0,
@@ -13,7 +13,7 @@
     {
       "type": "wokwi-breadboard-half",
       "id": "bb1",
-      "top": 430,
+      "top": 420,
       "left": -420,
       "attrs": {}
     },
@@ -27,13 +27,6 @@
       }
     },
     {
-      "type": "board-mfrc522",
-      "id": "rfid1",
-      "top": -20,
-      "left": 330,
-      "attrs": {}
-    },
-    {
       "type": "wokwi-membrane-keypad",
       "id": "keypad1",
       "top": -60,
@@ -42,9 +35,9 @@
     },
     {
       "type": "wokwi-pir-motion-sensor",
-      "id": "pirL",
-      "top": 300,
-      "left": -300,
+      "id": "pirWall",
+      "top": 290,
+      "left": -320,
       "attrs": {
         "delayTime": "3",
         "retrigger": "0"
@@ -52,18 +45,37 @@
     },
     {
       "type": "wokwi-pir-motion-sensor",
-      "id": "pirR",
-      "top": 300,
-      "left": -160,
+      "id": "pirSide",
+      "top": 290,
+      "left": -170,
       "attrs": {
         "delayTime": "3",
         "retrigger": "0"
       }
     },
     {
+      "type": "wokwi-resistor",
+      "id": "rPirWall",
+      "top": 240,
+      "left": -230,
+      "rotate": 0,
+      "attrs": {
+        "value": "6600"
+      }
+    },
+    {
+      "type": "wokwi-resistor",
+      "id": "rPirSide",
+      "top": 265,
+      "left": -230,
+      "attrs": {
+        "value": "6600"
+      }
+    },
+    {
       "type": "wokwi-slide-switch",
       "id": "tamper",
-      "top": 330,
+      "top": 320,
       "left": 60,
       "attrs": {
         "value": "",
@@ -72,35 +84,17 @@
     },
     {
       "type": "wokwi-resistor",
-      "id": "rPirL",
-      "top": 250,
-      "left": -230,
-      "attrs": {
-        "value": "10000"
-      }
-    },
-    {
-      "type": "wokwi-resistor",
-      "id": "rPirR",
-      "top": 280,
-      "left": -230,
-      "attrs": {
-        "value": "10000"
-      }
-    },
-    {
-      "type": "wokwi-resistor",
       "id": "rTamper",
-      "top": 280,
+      "top": 270,
       "left": 40,
       "attrs": {
-        "value": "10000"
+        "value": "2200"
       }
     },
     {
       "type": "wokwi-buzzer",
       "id": "bz1",
-      "top": 230,
+      "top": 220,
       "left": 330,
       "attrs": {
         "volume": "0.2"
@@ -126,16 +120,16 @@
     },
     {
       "type": "wokwi-led",
-      "id": "ledRed",
+      "id": "ledYellow",
       "top": 150,
       "left": 510,
       "attrs": {
-        "color": "red"
+        "color": "yellow"
       }
     },
     {
       "type": "wokwi-resistor",
-      "id": "rRed",
+      "id": "rYellow",
       "top": 110,
       "left": 490,
       "attrs": {
@@ -144,16 +138,16 @@
     },
     {
       "type": "wokwi-led",
-      "id": "ledYellow",
+      "id": "ledRed",
       "top": 150,
       "left": 570,
       "attrs": {
-        "color": "yellow"
+        "color": "red"
       }
     },
     {
       "type": "wokwi-resistor",
-      "id": "rYellow",
+      "id": "rRed",
       "top": 110,
       "left": 550,
       "attrs": {
@@ -163,33 +157,33 @@
   ],
   "connections": [
     [
-      "esp:TX0",
+      "esp:TX",
       "$serialMonitor:RX",
       "",
       []
     ],
     [
-      "esp:RX0",
+      "esp:RX",
       "$serialMonitor:TX",
       "",
       []
     ],
     [
-      "esp:VIN",
+      "esp:5V",
       "bb1:tp.1",
       "red",
-      []
-    ],
-    [
-      "esp:3V3",
-      "bb1:bp.1",
-      "orange",
       []
     ],
     [
       "esp:GND.1",
       "bb1:tn.1",
       "black",
+      []
+    ],
+    [
+      "esp:3V3",
+      "bb1:bp.1",
+      "orange",
       []
     ],
     [
@@ -205,13 +199,13 @@
       []
     ],
     [
-      "esp:D21",
+      "esp:21",
       "lcd1:SDA",
       "blue",
       []
     ],
     [
-      "esp:D22",
+      "esp:22",
       "lcd1:SCL",
       "purple",
       []
@@ -229,151 +223,109 @@
       []
     ],
     [
-      "esp:D5",
-      "rfid1:SDA",
-      "blue",
-      []
-    ],
-    [
-      "esp:D18",
-      "rfid1:SCK",
-      "blue",
-      []
-    ],
-    [
-      "esp:D23",
-      "rfid1:MOSI",
-      "blue",
-      []
-    ],
-    [
-      "esp:D19",
-      "rfid1:MISO",
-      "blue",
-      []
-    ],
-    [
-      "rfid1:3.3V",
-      "bb1:bp.3",
-      "orange",
-      []
-    ],
-    [
-      "rfid1:RST",
-      "bb1:bp.4",
-      "orange",
-      []
-    ],
-    [
-      "rfid1:GND",
-      "bb1:bn.3",
-      "black",
-      []
-    ],
-    [
-      "esp:D13",
+      "esp:13",
       "keypad1:R1",
       "violet",
       []
     ],
     [
-      "esp:D14",
+      "esp:14",
       "keypad1:R2",
       "violet",
       []
     ],
     [
-      "esp:D27",
+      "esp:27",
       "keypad1:R3",
       "violet",
       []
     ],
     [
-      "esp:D26",
+      "esp:26",
       "keypad1:R4",
       "violet",
       []
     ],
     [
-      "esp:D25",
+      "esp:25",
       "keypad1:C1",
       "violet",
       []
     ],
     [
-      "esp:D33",
+      "esp:33",
       "keypad1:C2",
       "violet",
       []
     ],
     [
-      "esp:D32",
+      "esp:32",
       "keypad1:C3",
       "violet",
       []
     ],
     [
-      "esp:D4",
+      "esp:4",
       "keypad1:C4",
       "violet",
       []
     ],
     [
-      "esp:D35",
-      "pirL:OUT",
+      "esp:35",
+      "pirWall:OUT",
       "gold",
       []
     ],
     [
-      "pirL:VCC",
+      "pirWall:VCC",
       "bb1:tp.5",
       "red",
       []
     ],
     [
-      "pirL:GND",
+      "pirWall:GND",
       "bb1:tn.5",
       "black",
       []
     ],
     [
-      "esp:D34",
-      "pirR:OUT",
+      "esp:34",
+      "pirSide:OUT",
       "gold",
       []
     ],
     [
-      "pirR:VCC",
+      "pirSide:VCC",
       "bb1:tp.7",
       "red",
       []
     ],
     [
-      "pirR:GND",
+      "pirSide:GND",
       "bb1:tn.7",
       "black",
       []
     ],
     [
-      "rPirL:1",
-      "esp:D35",
+      "rPirWall:1",
+      "esp:35",
       "gold",
       []
     ],
     [
-      "rPirL:2",
+      "rPirWall:2",
       "bb1:bp.6",
       "orange",
       []
     ],
     [
-      "rPirR:1",
-      "esp:D34",
+      "rPirSide:1",
+      "esp:34",
       "gold",
       []
     ],
     [
-      "rPirR:2",
+      "rPirSide:2",
       "bb1:bp.7",
       "orange",
       []
@@ -404,7 +356,7 @@
     ],
     [
       "bz1:2",
-      "esp:RX2",
+      "esp:16",
       "magenta",
       []
     ],
@@ -415,7 +367,7 @@
       []
     ],
     [
-      "esp:D2",
+      "esp:18",
       "rGreen:1",
       "green",
       []
@@ -433,37 +385,37 @@
       []
     ],
     [
-      "esp:D15",
-      "rRed:1",
-      "green",
-      []
-    ],
-    [
-      "rRed:2",
-      "ledRed:A",
-      "green",
-      []
-    ],
-    [
-      "ledRed:C",
-      "bb1:bn.11",
-      "black",
-      []
-    ],
-    [
-      "esp:D12",
+      "esp:19",
       "rYellow:1",
-      "green",
+      "gold",
       []
     ],
     [
       "rYellow:2",
       "ledYellow:A",
-      "green",
+      "gold",
       []
     ],
     [
       "ledYellow:C",
+      "bb1:bn.11",
+      "black",
+      []
+    ],
+    [
+      "esp:23",
+      "rRed:1",
+      "red",
+      []
+    ],
+    [
+      "rRed:2",
+      "ledRed:A",
+      "red",
+      []
+    ],
+    [
+      "ledRed:C",
       "bb1:bn.12",
       "black",
       []
