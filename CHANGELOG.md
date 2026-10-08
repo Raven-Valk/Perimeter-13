@@ -8,11 +8,29 @@ The version numbers here are the final ones. During development some versions ha
 
 | Version | Date | What changed | Working name |
 |---|---|---|---|
+| [`v4.1`](#v41) | 2026-10-08 | clear a tamper or fault on the module with a MAINTENANCE PIN | v5.1 |
 | [`v4`](#v4) | 2026-10-08 | sensor module firmware for two identical modules (A, B) | v5 (SensorModule) |
 | [`v3.1`](#v31) | 2026-10-07 | Wokwi simulation of the controller and gateway, bench tools | Pinnacle13_Firmware_v4 + Wokwi |
 | [`v3`](#v3) | 2026-10-06 | one controller board with both PIRs + listen-only gateway to the PC | Pinnacle13_Firmware_v4 (first) |
 | [`v2`](#v2) | 2026-10-06 | teammate's single-board draft (draft2.ino) | draft2.ino |
 | [`v1`](#v1) | 2026-10-05 | two-node firmware (main controller + sensor node over ESP-NOW) | Pinnacle13_Firmware |
+
+## v4.1
+
+*2026-10-08* · clear a tamper or fault on the module with a MAINTENANCE PIN · worked on as v5.1
+
+A tamper or fault can now be cleared at the module itself, not only from the gateway, but only with a MAINTENANCE PIN and only with the lid shut.
+
+**Sensor module**
+
+- During TAMPER_FAULT, a MAINTENANCE PIN + # on the module keypad clears it; the module runs its self-test (RECOVERY) and returns to armed or disarmed.
+- An OPERATOR PIN is refused and logged ("Access denied, Needs MAINT PIN"); a clear with the lid open is refused and logged.
+- The wrong-PIN lockout now also applies during a tamper or fault.
+- The LCD tells the user what is needed ("MAINT PIN + #").
+
+**Docs**
+
+- README test script extended: clear at the module, operator refused, clear from the gateway.
 
 ## v4
 

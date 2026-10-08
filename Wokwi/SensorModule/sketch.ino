@@ -14,10 +14,11 @@
 //  A single trigger is a warning (P1). On P2 BOTH modules sound.
 //
 //  Who controls what:
-//    * Arm / disarm / maintenance / clear tamper: ONLY by signed commands from
-//      the gateway (card + PIN there, or a logged-in PC). This keypad can't do them.
+//    * Arm / disarm / maintenance: ONLY by signed commands from the gateway
+//      (card + PIN there, or a logged-in PC). This keypad can't do them.
 //    * This keypad: during an alarm, any valid PIN + # silences THIS module.
-//      3 wrong PINs lock the keypad (60 s, 120 s, 240 s...).
+//      During tamper/fault, a MAINTENANCE PIN + # clears it (lid must be shut);
+//      the gateway can clear it too. 3 wrong PINs lock the keypad (60, 120, 240 s...).
 //
 //  Radio: ESP-NOW straight to the other module and to the gateway. Signed,
 //  replay-protected, and encrypted once MACs are set in secrets.h.
@@ -1424,7 +1425,7 @@ void handleIntrusion(char key) {
 
 void handleTamperFault(char key) {
   bool isTamper = faultReason.indexOf("tamper") >= 0 || faultReason.indexOf("Lid") >= 0;
-  setScreen(isTamper ? "!! TAMPER  P3 !!" : "!! FAULT   P3 !!", faultReason);
+  setScreen(isTamper ? "!! TAMPER  P3 !!" : "!! FAULT   P3 !!", faultReason + " | MAINT PIN + #");
   if (millis() - lastFaultReminder > FAULT_REMINDER_MS) {
     lastFaultReminder = millis();
     logEvent("FAULT", "Condition persists: " + faultReason);
@@ -1434,7 +1435,25 @@ void handleTamperFault(char key) {
       zones[i].eventPending = false;
       if (zones[i].health == H_OK) logEvent("SENSOR", "Motion during fault", zones[i].name, "-", 3);
     }
-  keypadHint(key, "Needs MAINT card", "at the gateway");
+
+  // Clear here with a MAINTENANCE PIN (or from the gateway). Lid must be shut.
+  const PinUser* u = pollPin(key);
+  if (!u) return;
+  String who = String(u->name) + "@" + MY_LETTER + "-KEYPAD";
+  if (u->role != R_MAINTENANCE) {
+    logEvent("FAULT", "Clear attempt by operator", "-", "DENIED", 3, who);
+    showMsg("Access denied", "Needs MAINT PIN");
+    return;
+  }
+  String b = faultBlocker();
+  if (b.length()) {
+    logEvent("FAULT", "Clear refused: " + b, "-", "REFUSED", 3, who);
+    showMsg("Cannot clear", b);
+    return;
+  }
+  logEvent("FAULT", "Fault cleared on keypad", "-", "OK", -1, who);
+  showMsg("Fault cleared", u->name);
+  goTo(S_RECOVERY, "fault cleared by " + who);                // self-test, then back to armed/disarmed
 }
 
 void handleMaintenance(char key) {
@@ -1489,7 +1508,7 @@ void renderLcd() {
     l2 = "PIN: ";
     for (unsigned i = 0; i < pinBuf.length(); i++) l2 += '*';   // never show digits
   }
-  if (lockoutRemainingS > 0 && state == S_INTRUSION) l2 = "Locked " + String(lockoutRemainingS) + "s";
+  if (lockoutRemainingS > 0 && (state == S_INTRUSION || state == S_TAMPER_FAULT)) l2 = "Locked " + String(lockoutRemainingS) + "s";
   if (notYet(msgUntil)) { l1 = msg1; l2 = msg2; }
   display.show(l1, marquee(l2));
 }

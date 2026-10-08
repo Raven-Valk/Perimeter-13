@@ -1,4 +1,4 @@
-# Project 13: Sensor Module firmware (v4)
+# Project 13: Sensor Module firmware (v4.1)
 
 One sketch runs on **both** sensor modules. The only line that differs between them is near the top of `SensorModule.ino`:
 
@@ -33,8 +33,10 @@ A single trigger is only a warning (P1): a short beep, the yellow LED, and the L
 
 | Action | How |
 |---|---|
-| Arm, disarm, maintenance mode, clear tamper | **Only at the gateway** (card + PIN) or from the logged-in PC. The module still checks the role and its own state. For example, it never arms with the lid open or a PIR stuck. |
-| Silence this module's alarm | Any valid PIN, then **#**, on this module's keypad. It silences this module only. 3 wrong PINs lock the keypad for 60 s, then 120 s, then 240 s. The lockout survives a restart. |
+| Arm, disarm, maintenance mode | **Only at the gateway** (card + PIN) or from the logged-in PC. The module still checks the role and its own state. For example, it never arms with the lid open or a PIR stuck. |
+| Clear a tamper or fault | **Either** at the gateway (maintenance card + PIN, or the PC) **or** on this module's keypad with a **MAINTENANCE PIN**, then **#**. The lid must be shut. An operator PIN is refused and logged. The module then runs its self-test and returns to the mode it was in (armed or disarmed). |
+| Silence this module's alarm | Any valid PIN, then **#**, on this module's keypad. It silences this module only. |
+| Wrong PINs (alarm or tamper) | 3 wrong PINs lock the keypad for 60 s, then 120 s, then 240 s. The lockout survives a restart. |
 
 **If the gateway or the other module goes offline,** this module keeps detecting and sounding. The LCD shows "GW link DOWN" or "Module B DOWN". Without the other module, a WALL trigger can only be confirmed by the 3-hit rule or the module's own SIDE PIR.
 
@@ -112,7 +114,9 @@ These act as a MAINTENANCE user, with no card or PIN. **Set `BENCH_COMMANDS 0` a
 | T03 Lockout | 3 wrong PINs | "LOCKED 60 s" |
 | T12 Acknowledge + recovery | `1234#` (or `ack`) | RECOVERY, self-test, back to ARMED |
 | T07 Tamper | open the lid (pull the reed's magnet away) | red fast blink, "!! TAMPER P3 !!" |
-| Clear tamper | close the lid, then `clear` | RECOVERY, then ARMED |
+| Clear tamper (module) | close the lid, then `9876#` on the module keypad | "Fault cleared", RECOVERY, then ARMED |
+| Clear tamper (operator) | during a tamper: `1234#` | "Access denied, Needs MAINT PIN" |
+| Clear tamper (gateway) | close the lid, then `clear` (bench) or the gateway's clear | RECOVERY, then ARMED |
 | T06 Stuck sensor | unplug a PIR's OUT wire while armed | after ~30 s: "FAULT P3 A-WALL STUCK" |
 | T08 Invalid input | while armed, press **A** | "Invalid input" |
 | T09 Link loss | switch Module B off | A logs "Module B link DOWN". A still alarms (3-hit rule) |
@@ -134,5 +138,5 @@ log_no,boot,uptime_ms,unix_time,module,priority,state,type,event,zone,user,resul
 
 - **Keys and PIN hashes in flash:** anyone who has the board in hand can read them out. Opening the lid still raises P3. ESP32 flash encryption fixes this, but it can't be undone, so leave it off the demo boards.
 - **Radio jamming:** it can't be prevented. It shows up as "link DOWN" in the log and on the LCD, and each module keeps alarming on its own.
-- **Module keypads are PIN-only** (no card reader). That's why they can only silence their own module's alarm.
+- **Module keypads are PIN-only** (no card reader). That's why they can only silence their own module's alarm and, with a MAINTENANCE PIN, clear a tamper. Arming, disarming and maintenance mode still need the gateway.
 - **`BENCH_COMMANDS 1` lets USB bypass card + PIN.** It's for testing only.

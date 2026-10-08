@@ -1,4 +1,4 @@
-# Project 13: Secure Perimeter Intrusion Detection (v4)
+# Project 13: Secure Perimeter Intrusion Detection (v4.1)
 
 > **Repository note.** Each `secrets.h` is stored here as `secrets.example.h` with demo values only. Copy it to `secrets.h` in the same folder before compiling, and use your own keys and PINs. `secrets.h` is in `.gitignore` and must never be committed.
 

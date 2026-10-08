@@ -33,6 +33,7 @@ You should see:
 | Click in the **Serial Monitor**, type `arm`, then Enter | arm (acts as the gateway). Also: `disarm`, `ack`, `clear`, `maint 30`, `end`, `status`, `log` |
 | Click a **PIR → Simulate motion** | the **left** PIR is **WALL** (GPIO 35), the right one is **SIDE** (GPIO 34) |
 | Keypad: `1234` then **#** | silence this module's alarm (PIN 1234 = Operator1, 9876 = Maint1) |
+| Keypad: `9876` then **#** during a tamper | clear the tamper (MAINTENANCE PIN only, lid shut) |
 | **Slide switch** to the right | lid opened (tamper). Slide it left = lid shut |
 
 ## Test script
@@ -49,7 +50,9 @@ Type `arm` in **both** tabs first.
 | 6 Own pair | after acknowledging: A: WALL, then A: SIDE | INTRUSION ("A-WALL + A-SIDE") | INTRUSION |
 | 7 Wrong PIN + lockout | during an alarm: `1111#` three times | "Wrong PIN…", then "LOCKED 60 s" | — |
 | 8 Tamper | A: slide switch right | "!! TAMPER P3 !!" | — |
-| | slide it left, then type `clear` | RECOVERY, then ARMED | — |
+| | keypad `9876#` while the switch is still right | "Cannot clear, Lid open" | — |
+| | slide it left, then keypad `1234#` | "Access denied, Needs MAINT PIN" | — |
+| | keypad `9876#` (or type `clear`) | "Fault cleared", RECOVERY, then ARMED | — |
 | 9 Link loss | **Stop** tab B | within ~8 s: "Module B DOWN" (alarms still work) | — |
 | | Press ▶ on B again | "Module B restarted", "link UP" | starts DISARMED (Wokwi keeps no memory between runs) |
 | 10 Fake module | in B, change one byte of `KEY_A_B` (e.g. `0x6E` to `0x6F`), ▶ | log: "Module B: bad signature (spoofed?) REJECTED" | its events are ignored by A |
