@@ -1,4 +1,4 @@
-# Project 13: Sensor Module firmware (v4.2)
+# Project 13: Sensor Module firmware (v4.3)
 
 One sketch runs on **both** sensor modules. The only line that differs between them is near the top of `SensorModule.ino`:
 
@@ -51,20 +51,20 @@ A single trigger is only a warning (P1): a short beep, the yellow LED, and the L
 
 ## Pin map: ESP32 DevKitC 38-pin
 
-The LEDs moved off the boot pins (2, 12, 15) that Board 1 used before. The PIRs stay on 35 and 34, so your existing PIR breadboard wiring still fits: **PIR-L is now WALL (35)** and **PIR-R is now SIDE (34)**.
+The PIRs and the tamper switch are on normal pins and use the ESP32's **built-in pull-up**, so they need **no resistors**. (The old pins 34/35/39 have no built-in pull-up, which is why they needed the 2.2 kΩ chains.) To free those pins, the yellow and red LEDs moved to boot pins 2 and 15. An LED with its resistor to GND is safe there; the red LED may blink once at power-on.
 
 | Part | Part pin | ESP32 pin | Notes |
 |---|---|---|---|
 | LCD 16×2 (I2C) | SDA / SCL | **21 / 22** | VCC to the 5 V rail |
 | Keypad 4×4 | pins 1–4 (rows) | **13, 14, 27, 26** | pin 1 is the leftmost with the keys facing you |
 | Keypad 4×4 | pins 5–8 (columns) | **25, 33, 32, 4** | |
-| WALL PIR | OUT | **35** | + pull-up (3 × 2.2 kΩ in series) from 35 to the 3.3 V rail. VCC to 5 V |
-| SIDE PIR | OUT | **34** | + pull-up (3 × 2.2 kΩ in series) from 34 to the 3.3 V rail. VCC to 5 V |
-| Tamper reed switch | wire 1 / wire 2 | **39 (VN)** / GND | + 2.2 kΩ from 39 to the 3.3 V rail |
+| WALL PIR | OUT | **17** | no resistor. VCC to 5 V |
+| SIDE PIR | OUT | **19** | no resistor. VCC to 5 V |
+| Tamper reed switch | wire 1 / wire 2 | **23** / GND | no resistor |
 | Buzzer module (3-pin) | S (signal) | **16** | VCC to the 3.3 V rail. If it beeps when it should be quiet, set `BUZZER_ACTIVE_LOW true` |
 | Green LED | anode (long leg) | **18** | through 220–330 Ω. A 2.2 kΩ resistor also works, but the LED is dim |
-| Yellow LED | anode | **19** | same |
-| Red LED | anode | **23** | same |
+| Yellow LED | anode | **2** | same |
+| Red LED | anode | **15** | same |
 | (spare) IR sensor | OUT | 36 (VP) | for later |
 
 **Power rails:**
@@ -72,6 +72,8 @@ The LEDs moved off the boot pins (2, 12, 15) that Board 1 used before. The PIRs 
 - ESP32 **3V3** goes to the bottom + rail, and **GND** to the bottom − rail.
 - Join the two − rails.
 - Power the ESP32 from a 5 V USB adapter.
+
+**Long sensor wires:** the built-in pull-up is weaker (about 45 kΩ) than a resistor on the breadboard. On a table-top model that's fine. If a PIR or the tamper sits more than ~50 cm away and you see false triggers, add a 10 kΩ from that pin to 3.3 V. Never add one to pin 2 or 15.
 
 ## Setting up the boards (both modules and the gateway)
 

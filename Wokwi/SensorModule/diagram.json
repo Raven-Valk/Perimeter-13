@@ -54,25 +54,6 @@
       }
     },
     {
-      "type": "wokwi-resistor",
-      "id": "rPirWall",
-      "top": 240,
-      "left": -230,
-      "rotate": 0,
-      "attrs": {
-        "value": "6600"
-      }
-    },
-    {
-      "type": "wokwi-resistor",
-      "id": "rPirSide",
-      "top": 265,
-      "left": -230,
-      "attrs": {
-        "value": "6600"
-      }
-    },
-    {
       "type": "wokwi-slide-switch",
       "id": "tamper",
       "top": 320,
@@ -80,15 +61,6 @@
       "attrs": {
         "value": "",
         "bounce": "0"
-      }
-    },
-    {
-      "type": "wokwi-resistor",
-      "id": "rTamper",
-      "top": 270,
-      "left": 40,
-      "attrs": {
-        "value": "2200"
       }
     },
     {
@@ -271,7 +243,7 @@
       []
     ],
     [
-      "esp:35",
+      "esp:17",
       "pirWall:OUT",
       "gold",
       []
@@ -289,7 +261,7 @@
       []
     ],
     [
-      "esp:34",
+      "esp:19",
       "pirSide:OUT",
       "gold",
       []
@@ -307,44 +279,8 @@
       []
     ],
     [
-      "rPirWall:1",
-      "esp:35",
-      "gold",
-      []
-    ],
-    [
-      "rPirWall:2",
-      "bb1:bp.6",
-      "orange",
-      []
-    ],
-    [
-      "rPirSide:1",
-      "esp:34",
-      "gold",
-      []
-    ],
-    [
-      "rPirSide:2",
-      "bb1:bp.7",
-      "orange",
-      []
-    ],
-    [
-      "rTamper:1",
-      "esp:VN",
-      "gray",
-      []
-    ],
-    [
-      "rTamper:2",
-      "bb1:bp.8",
-      "orange",
-      []
-    ],
-    [
       "tamper:2",
-      "esp:VN",
+      "esp:23",
       "gray",
       []
     ],
@@ -385,7 +321,7 @@
       []
     ],
     [
-      "esp:19",
+      "esp:2",
       "rYellow:1",
       "gold",
       []
@@ -403,7 +339,7 @@
       []
     ],
     [
-      "esp:23",
+      "esp:15",
       "rRed:1",
       "red",
       []

@@ -8,6 +8,7 @@ The version numbers here are the final ones. During development some versions ha
 
 | Version | Date | What changed | Working name |
 |---|---|---|---|
+| [`v4.3`](#v43) | 2026-10-09 | built-in pull-ups instead of resistors, new pin map, wiring diagrams | v5.3 |
 | [`v4.2`](#v42) | 2026-10-09 | gateway control box, PC login protocol, links off until MACs are set | v5.2 |
 | [`v4.1`](#v41) | 2026-10-08 | clear a tamper or fault on the module with a MAINTENANCE PIN | v5.1 |
 | [`v4`](#v4) | 2026-10-08 | sensor module firmware for two identical modules (A, B) | v5 (SensorModule) |
@@ -15,6 +16,27 @@ The version numbers here are the final ones. During development some versions ha
 | [`v3`](#v3) | 2026-10-06 | one controller board with both PIRs + listen-only gateway to the PC | Pinnacle13_Firmware_v4 (first) |
 | [`v2`](#v2) | 2026-10-06 | teammate's single-board draft (draft2.ino) | draft2.ino |
 | [`v1`](#v1) | 2026-10-05 | two-node firmware (main controller + sensor node over ESP-NOW) | Pinnacle13_Firmware |
+
+## v4.3
+
+*2026-10-09* · built-in pull-ups instead of resistors, new pin map, wiring diagrams · worked on as v5.3
+
+Simpler wiring: the PIRs and tamper switches move to pins that have the ESP32's built-in pull-up, so the 2.2 kOhm resistor chains are no longer needed. Wiring diagrams for both boards.
+
+**Sensor module pins**
+
+- WALL PIR 35 -> 17, SIDE PIR 34 -> 19, tamper 39 -> 23, all with INPUT_PULLUP and no resistors.
+- Yellow and red LEDs move to boot pins 2 and 15 (an LED + resistor to GND is safe there).
+- Note for long sensor wires (over about 50 cm): add a 10 kOhm pull-up if false triggers appear.
+
+**Gateway pins**
+
+- Tamper 39 -> RX2 (16) with the built-in pull-up; yellow LED -> D15.
+
+**Docs and simulation**
+
+- Wiring diagrams (SVG + PNG) for the gateway and the sensor module (Diagrams/).
+- Wokwi diagrams updated to the new pins (resistors removed).
 
 ## v4.2
 

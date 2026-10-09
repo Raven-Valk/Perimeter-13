@@ -51,15 +51,6 @@
       }
     },
     {
-      "type": "wokwi-resistor",
-      "id": "rTamper",
-      "top": 280,
-      "left": 40,
-      "attrs": {
-        "value": "2200"
-      }
-    },
-    {
       "type": "wokwi-led",
       "id": "ledGreen",
       "top": 150,
@@ -272,20 +263,8 @@
       []
     ],
     [
-      "rTamper:1",
-      "esp:VN",
-      "gray",
-      []
-    ],
-    [
-      "rTamper:2",
-      "bb1:bp.8",
-      "orange",
-      []
-    ],
-    [
       "tamper:2",
-      "esp:VN",
+      "esp:RX2",
       "gray",
       []
     ],
@@ -332,7 +311,7 @@
       []
     ],
     [
-      "esp:RX2",
+      "esp:D15",
       "rYellow:1",
       "green",
       []

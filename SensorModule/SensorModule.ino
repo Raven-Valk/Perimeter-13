@@ -67,20 +67,22 @@ struct PinUser { const char* name; const char* pinHashHex; Role role; };
 
 // =====================================================================
 //  PINS — ESP32 DevKitC 38-pin (WROOM-32). Check against your board's labels.
-//  GPIO 34/35/36/39 are input-only with NO internal pull-ups -> external pull-up.
-//  Strapping pins (0, 2, 5, 12, 15) are left unused.
+//  The PIRs and the tamper switch are on normal pins and use the ESP32's
+//  built-in pull-up (INPUT_PULLUP): no resistors needed for them.
+//  Two LEDs sit on boot pins 2 and 15: an LED + resistor to GND is safe there.
+//  Pins 0, 5, 12 and the input-only pins 34/35/39 are left unused.
 // =====================================================================
 const uint8_t PIN_SDA = 21, PIN_SCL = 22;                        // LCD I2C
 byte KP_ROWS[4] = { 13, 14, 27, 26 };                            // keypad pins 1-4
 byte KP_COLS[4] = { 25, 33, 32, 4 };                             // keypad pins 5-8 (driven: normal I/O only)
 const uint8_t PIN_BUZZER     = 16;
 const uint8_t PIN_LED_GREEN  = 18;
-const uint8_t PIN_LED_YELLOW = 19;
-const uint8_t PIN_LED_RED    = 23;
-const uint8_t PIN_PIR_WALL   = 35;    // + pull-up (3 x 2.2k in series) to 3.3 V
-const uint8_t PIN_PIR_SIDE   = 34;    // + pull-up (3 x 2.2k in series) to 3.3 V
-const uint8_t PIN_TAMPER     = 39;    // VN. + 2.2k pull-up; reed switch to GND
-const uint8_t PIN_IR         = 36;    // VP. Spare for an IR sensor later
+const uint8_t PIN_LED_YELLOW = 2;     // boot pin: the LED to GND keeps it LOW at boot, which is what it needs
+const uint8_t PIN_LED_RED    = 15;    // boot pin: the LED to GND only hides the boot messages; may blink at power-on
+const uint8_t PIN_PIR_WALL   = 17;    // built-in pull-up
+const uint8_t PIN_PIR_SIDE   = 19;    // built-in pull-up
+const uint8_t PIN_TAMPER     = 23;    // reed switch to GND; built-in pull-up
+const uint8_t PIN_IR         = 36;    // VP. Spare for an IR sensor later (its module has its own pull-up)
 
 const uint8_t TAMPER_CLOSED_LEVEL = LOW;   // lid shut = LOW; lid open OR wire cut = HIGH
 const bool    BUZZER_ACTIVE_LOW   = false; // true if your buzzer module beeps when the pin is LOW
@@ -187,7 +189,7 @@ public:
 
   void begin() {
     if (!enabled) return;
-    pinMode(pin, INPUT);                       // pull-up is external (34-39)
+    pinMode(pin, pin >= 34 ? INPUT : INPUT_PULLUP);   // built-in pull-up (pins 34-39 have none)
     health = needsWarmup ? H_WARMUP : H_OK;
   }
 
@@ -264,7 +266,7 @@ bool peerWallRecent(uint32_t now) { return peerWallValid && now - peerWallAt < C
 class TamperSensor {
 public:
   void begin() {
-    pinMode(PIN_TAMPER, INPUT);              // external pull-up (GPIO 39)
+    pinMode(PIN_TAMPER, INPUT_PULLUP);       // built-in pull-up: lid open or wire cut reads HIGH
     stable = candidate = digitalRead(PIN_TAMPER);
     changedAt = millis();
   }

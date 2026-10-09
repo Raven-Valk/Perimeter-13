@@ -1,4 +1,4 @@
-# Project 13: Gateway firmware (v4.2)
+# Project 13: Gateway firmware (v4.3)
 
 The control box: an ESP32 DevKit V1 (30-pin) on a 5 V adapter, with the RFID reader, 4×4 keypad, 16×2 LCD, a tamper switch and 3 LEDs (no buzzer). It talks by radio to Module A, Module B and the PC dongle.
 
@@ -83,7 +83,7 @@ A:ARM B:ARM PC:Y
 
 ## Pin map: ESP32 DevKit V1, 30-pin
 
-The RFID reader, keypad and LCD use the same pins as Board 1 before. The LEDs moved to D2, RX2 and TX2.
+The RFID reader, keypad and LCD use the same pins as Board 1 before. The tamper switch is on RX2 and uses the ESP32's **built-in pull-up**, so it needs **no resistor**. The LEDs are on D2, D15 and TX2. D2 and D15 are boot pins; an LED with its resistor to GND is safe there, and the yellow LED may blink once at power-on.
 
 | Part | Part pin | ESP32 pin (label) | Notes |
 |---|---|---|---|
@@ -96,9 +96,9 @@ The RFID reader, keypad and LCD use the same pins as Board 1 before. The LEDs mo
 | | 3.3V / GND | 3.3 V rail / GND | |
 | Keypad 4×4 | pins 1–4 (rows) | **D13, D14, D27, D26** | pin 1 is the leftmost with the keys facing you |
 | | pins 5–8 (columns) | **D25, D33, D32, D4** | |
-| Tamper reed switch | wire 1 / wire 2 | **VN (GPIO 39)** / GND | + 2.2 kΩ from VN to the 3.3 V rail |
+| Tamper reed switch | wire 1 / wire 2 | **RX2 (GPIO 16)** / GND | no resistor |
 | Green LED | anode (long leg) | **D2** | through 220–330 Ω (2.2 kΩ works, but dim). The blue on-board LED lights with it |
-| Yellow LED | anode | **RX2 (GPIO 16)** | same |
+| Yellow LED | anode | **D15** | same |
 | Red LED | anode | **TX2 (GPIO 17)** | same |
 
 **Power rails:**

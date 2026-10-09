@@ -61,7 +61,9 @@ struct PcUser   { const char* name; const char* pwHashHex; Role role; };
 
 // =====================================================================
 //  PINS — ESP32 DevKit V1 30-pin. RFID, keypad and LCD as on Board 1 before.
-//  LEDs on 2 (also the on-board LED), 16 and 17.
+//  Tamper switch on RX2 (16) with the ESP32's built-in pull-up: no resistor.
+//  LEDs on D2 (also the on-board LED), D15 and TX2 (17). D2 and D15 are boot
+//  pins: an LED + resistor to GND is safe there.
 // =====================================================================
 const uint8_t PIN_SDA = 21, PIN_SCL = 22;                        // LCD I2C
 const uint8_t PIN_RFID_SCK = 18, PIN_RFID_MISO = 19;             // RC522 SPI
@@ -69,9 +71,9 @@ const uint8_t PIN_RFID_MOSI = 23, PIN_RFID_SS = 5;               // RC522 RST wi
 byte KP_ROWS[4] = { 13, 14, 27, 26 };                            // keypad pins 1-4
 byte KP_COLS[4] = { 25, 33, 32, 4 };                             // keypad pins 5-8
 const uint8_t PIN_LED_GREEN  = 2;
-const uint8_t PIN_LED_YELLOW = 16;    // RX2
+const uint8_t PIN_LED_YELLOW = 15;    // D15 (boot pin: the LED only hides the boot messages; may blink at power-on)
 const uint8_t PIN_LED_RED    = 17;    // TX2
-const uint8_t PIN_TAMPER     = 39;    // VN. + 2.2k pull-up; reed switch to GND
+const uint8_t PIN_TAMPER     = 16;    // RX2. Reed switch to GND; built-in pull-up
 
 const uint8_t TAMPER_CLOSED_LEVEL = LOW;   // lid shut = LOW; lid open OR wire cut = HIGH
 const uint8_t LCD_ADDR            = 0x27;  // try 0x3F if the LCD stays blank
@@ -125,7 +127,7 @@ uint8_t systemPriority();
 class TamperSensor {
 public:
   void begin() {
-    pinMode(PIN_TAMPER, INPUT);              // external pull-up (GPIO 39)
+    pinMode(PIN_TAMPER, INPUT_PULLUP);       // built-in pull-up: lid open or wire cut reads HIGH
     stable = candidate = digitalRead(PIN_TAMPER);
     changedAt = millis();
   }

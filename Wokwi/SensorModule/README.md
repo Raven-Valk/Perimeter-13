@@ -31,7 +31,7 @@ You should see:
 | Do this in Wokwi | Means |
 |---|---|
 | Click in the **Serial Monitor**, type `arm`, then Enter | arm (acts as the gateway). Also: `disarm`, `ack`, `clear`, `maint 30`, `end`, `status`, `log` |
-| Click a **PIR → Simulate motion** | the **left** PIR is **WALL** (GPIO 35), the right one is **SIDE** (GPIO 34) |
+| Click a **PIR → Simulate motion** | the **left** PIR is **WALL** (GPIO 17), the right one is **SIDE** (GPIO 19) |
 | Keypad: `1234` then **#** | silence this module's alarm (PIN 1234 = Operator1, 9876 = Maint1) |
 | Keypad: `9876` then **#** during a tamper | clear the tamper (MAINTENANCE PIN only, lid shut) |
 | **Slide switch** to the right | lid opened (tamper). Slide it left = lid shut |
