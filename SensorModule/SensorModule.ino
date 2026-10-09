@@ -1,6 +1,6 @@
 // =====================================================================
 //  PINNACLE 1 — PROJECT 13 — SECURE PERIMETER INTRUSION DETECTION
-//  SENSOR MODULE  (A or B)  —  ESP32 DevKitC 38-pin (WROOM-32)  —  firmware v5
+//  SENSOR MODULE  (A or B)  —  ESP32 DevKitC 38-pin (WROOM-32)  —  firmware v5.4
 //
 //  Two of these sit at the two ends of one wall:
 //    WALL PIR  looks along the wall toward the other module
@@ -24,6 +24,10 @@
 //  replay-protected, and encrypted once MACs are set in secrets.h.
 //  If the gateway or the other module disappears, this module keeps
 //  detecting and alarming on its own.
+//
+//  Radio channel: the gateway's Wi-Fi network decides it. When the gateway
+//  goes quiet this module looks for it on the other channels by itself
+//  (about 2 s) and remembers where it found it.
 //
 //  States:  BOOT -> DISARMED <-> ARMED -> INTRUSION / TAMPER_FAULT / MAINTENANCE
 //           -> RECOVERY -> ARMED or DISARMED
@@ -121,6 +125,10 @@ const uint32_t CORROBORATION_MS     = 20000;   // window for confirming a trigge
 const uint8_t  REPEAT_TRIGGERS      = 3;       // same PIR this often in the window = P2
 const uint32_t STATUS_EVERY_MS      = 1000;
 const uint32_t LINK_TIMEOUT_MS      = WOKWI_SIM ? 8000 : 3000;   // MQTT via internet is slower
+const uint32_t GW_SEARCH_AFTER_MS   = 8000;    // gateway silent this long: look for it on the other channels
+const uint32_t CH_DWELL_MS          = 160;     // per channel: send a HELLO, wait for the gateway's answer
+const uint32_t CH_SEARCH_MIN_MS     = 10000;   // not found: stay on our channel, try again after 10, 20, 40, 60 s
+const uint32_t CH_SEARCH_MAX_MS     = 60000;
 const uint8_t  MAX_ATTEMPTS         = 3;
 const uint32_t BASE_LOCKOUT_S       = 60;      // 60, 120, 240, 480, 960
 const uint8_t  MAX_LOCKOUT_LEVEL    = 4;
@@ -380,7 +388,7 @@ uint32_t unixNow() { return timeSynced ? timeBase + (millis() - timeBaseMs) / 10
 //  Real board: ESP-NOW (encrypted per link when MACs are set).
 //  Wokwi: the same signed packets over MQTT.
 // =====================================================================
-struct RxItem { uint8_t src[6]; int len; uint8_t data[sizeof(LinkPacket)]; };
+struct RxItem { uint8_t src[6]; int8_t rssi; int len; uint8_t data[sizeof(LinkPacket)]; };
 QueueHandle_t rxQueue;
 const uint8_t BROADCAST[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
 
@@ -393,6 +401,7 @@ struct PeerLink {
   bool           macSet = false;
   bool           encrypted = false;
   uint32_t       beats = 0;
+  int8_t         rssi = 0;           // signal of its last packet
   PeerLink(uint8_t n, const char* nm, const uint8_t* m, const uint8_t* k) : node(n), name(nm), mac(m), key(k) {}
 };
 PeerLink gwLink  (NODE_GATEWAY, "Gateway", MAC_GATEWAY, KEY_MOD_GW);
@@ -401,6 +410,8 @@ PeerLink peerLink(PEER_NODE,    PEER_NAME, MAC_PEER,    KEY_A_B);
 uint32_t myBoot = 0, mySeq = 0;
 uint8_t  myReset = 0;
 bool     radioReady = false;
+uint8_t  radioCh = ESPNOW_DEFAULT_CHANNEL;     // channel ESP-NOW is on (the gateway's Wi-Fi decides it)
+uint8_t  gwSaysCh = 0;                         // the channel the gateway says it is on (in its HELLO / ACK)
 
 bool macIsSet(const uint8_t* m) { for (int i = 0; i < 6; i++) if (m[i]) return true; return false; }
 
@@ -417,6 +428,7 @@ String topicFor(uint8_t node) { return String(MQTT_TOPIC_BASE) + "/to/" + nodeLe
 void onMqtt(char* topic, byte* payload, unsigned int len) {
   RxItem it;
   memset(it.src, 0, 6);
+  it.rssi = 0;
   it.len = len;
   memcpy(it.data, payload, min((int)len, (int)sizeof(it.data)));
   xQueueSend(rxQueue, &it, 0);
@@ -431,6 +443,11 @@ void onRecv(const uint8_t* src, const uint8_t* data, int len) {
 #endif
   RxItem it;                                   // runs in the Wi-Fi task: copy + queue only
   memcpy(it.src, src, 6);
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+  it.rssi = info->rx_ctrl ? (int8_t)info->rx_ctrl->rssi : 0;
+#else
+  it.rssi = 0;
+#endif
   it.len = len;
   memcpy(it.data, data, min(len, (int)sizeof(it.data)));
   xQueueSend(rxQueue, &it, 0);
@@ -440,7 +457,7 @@ bool addEncryptedPeer(PeerLink& L) {
   if (!L.macSet) return true;                  // no MAC yet: uses signed broadcast instead
   esp_now_peer_info_t pi = {};
   memcpy(pi.peer_addr, L.mac, 6);
-  pi.channel = ESPNOW_CHANNEL;
+  pi.channel = 0;                              // 0 = whatever channel the radio is on
   pi.ifidx   = WIFI_IF_STA;
   pi.encrypt = true;
   linkLmk(L.key, 32, pi.lmk);
@@ -463,9 +480,12 @@ void radioBegin() {
   mqtt.setSocketTimeout(2);
   radioReady = true;
 #else
+  WiFi.persistent(false);
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
-  esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
+  radioCh = prefs.getUChar("ch", ESPNOW_DEFAULT_CHANNEL);   // where the gateway was last time
+  if (radioCh < 1 || radioCh > 13) radioCh = ESPNOW_DEFAULT_CHANNEL;
+  esp_wifi_set_channel(radioCh, WIFI_SECOND_CHAN_NONE);
   if (esp_now_init() != ESP_OK) { radioReady = false; return; }
   esp_now_register_recv_cb(onRecv);
   esp_now_set_pmk(ESPNOW_PMK);
@@ -473,7 +493,7 @@ void radioBegin() {
   addEncryptedPeer(peerLink);
   esp_now_peer_info_t bc = {};                 // fallback for links whose MAC isn't set yet
   memcpy(bc.peer_addr, BROADCAST, 6);
-  bc.channel = ESPNOW_CHANNEL;
+  bc.channel = 0;
   bc.ifidx   = WIFI_IF_STA;
   bc.encrypt = false;
   esp_now_add_peer(&bc);
@@ -657,12 +677,15 @@ void handlePacket(const RxItem& it) {
   uint8_t exp[SIG_LEN];
   linkSign(L->key, 32, p, exp);
   if (!sameBytes(exp, p.sig, SIG_LEN)) { reject(RJ_SIG, String(L->name) + ": bad signature (spoofed?)"); return; }
+  if (it.rssi) L->rssi = it.rssi;
   if (p.dstBoot != myBoot) L->trk.sendHello = true;          // it doesn't know our current boot yet
   if (linkNeedsFreshness(p.type) && p.dstBoot != myBoot) {
     reject(RJ_STALE, String(L->name) + ": stale (made before our restart)"); return;
   }
   TrackResult tr = L->trk.accept(p);
   if (tr == TR_UNSYNCED) return;                             // waiting for its HELLO (about 1 s)
+  if (L == &gwLink && (p.type == L_HELLO || p.type == L_ACK) && p.code >= 1 && p.code <= 13 &&
+      (tr == TR_OK || tr == TR_SYNCED || tr == TR_NEW_BOOT)) gwSaysCh = p.code;
   if (tr == TR_OLD_BOOT) { reject(RJ_REPLAY, String(L->name) + ": older boot number refused (flash erased? restart this board)"); return; }
   if (tr == TR_REPLAY) { reject(RJ_REPLAY, String(L->name) + ": replayed/old packet"); return; }
   if (tr == TR_NEW_BOOT) logEvent("COMM", String(L->name) + " restarted (" + resetReasonName(p.resetReason) + ")");
@@ -687,6 +710,97 @@ void checkLinkTimeout(PeerLink& L) {
 
 uint32_t lastStatus = 0;
 
+// ---------------- finding the gateway's channel (real board) ----------------
+// The gateway's radio sits on its Wi-Fi network's channel, which can change
+// (a laptop hotspot follows the laptop's own Wi-Fi). Every HELLO / ACK from the
+// gateway says which channel it is on: if that isn't ours (2.4 GHz channels
+// overlap, so a neighbour channel can still hear it), move there at once.
+// When the gateway goes quiet, step through the other channels: on each one
+// send it a HELLO and listen briefly — it answers at once. Not found: go back
+// to our channel and try again later. Alarms run locally the whole time.
+//   * No search during an intrusion, or while a single trigger is waiting to be
+//     confirmed: the other module's alarm or wall event must not be missed.
+//   * While the two modules hear each other, only Module A searches. Module B
+//     follows when it has lost both (it then searches every 10 s).
+#if !WOKWI_SIM
+struct {
+  bool     active = false;
+  uint8_t  homeCh = 0, step = 0;
+  uint32_t startedAt = 0, nextStepAt = 0, nextSearchAt = 0, waitMs = CH_SEARCH_MIN_MS;
+  bool     reported = false;                    // "not found" logged once per outage
+} chSearch;
+
+void setRadioChannel(uint8_t ch) { esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE); radioCh = ch; }
+
+bool gatewayHeardSince(uint32_t t) { return gwLink.trk.lastHeard && (int32_t)(gwLink.trk.lastHeard - t) >= 0; }
+
+bool triggerPending(uint32_t now) {
+  for (uint8_t i = 0; i < ZONE_COUNT; i++) if (zones[i].recent(now)) return true;
+  return peerWallRecent(now);
+}
+
+void endSearch(bool found) {
+  chSearch.active = false;
+  if (found) { chSearch.waitMs = CH_SEARCH_MIN_MS; chSearch.reported = false; }
+}
+
+void channelLoop(uint32_t now) {
+  if (gwSaysCh && gwSaysCh != radioCh) {                       // the gateway told us where it is
+    uint8_t was = radioCh;
+    setRadioChannel(gwSaysCh);
+    prefs.putUChar("ch", radioCh);
+    if (chSearch.active) endSearch(true);
+    logEvent("COMM", "Gateway is on channel " + String(radioCh) + " (was " + String(was) + ")");
+    return;
+  }
+  bool hold = state == S_INTRUSION || triggerPending(now);
+  if (chSearch.active) {
+    if (gatewayHeardSince(chSearch.startedAt)) {               // it answered on this channel
+      if (radioCh != chSearch.homeCh) {
+        prefs.putUChar("ch", radioCh);
+        logEvent("COMM", "Gateway found on channel " + String(radioCh) + " (was " + String(chSearch.homeCh) + ")");
+      }
+      endSearch(true);
+      return;
+    }
+    if (hold) { setRadioChannel(chSearch.homeCh); endSearch(false); return; }   // stay with the other module
+    if (notYet(chSearch.nextStepAt)) return;
+    if (++chSearch.step > 13) {                                // every channel tried
+      setRadioChannel(chSearch.homeCh);
+      endSearch(false);
+      chSearch.nextSearchAt = now + chSearch.waitMs;
+      chSearch.waitMs = min(chSearch.waitMs * 2, CH_SEARCH_MAX_MS);
+      if (!chSearch.reported) {
+        chSearch.reported = true;
+        logEvent("COMM", "Gateway not found on any channel: staying on " + String(radioCh) + ", retrying");
+      }
+      return;
+    }
+    if (chSearch.step == chSearch.homeCh) return;              // already listened there
+    setRadioChannel(chSearch.step);
+    linkSend(gwLink, L_HELLO, 0, 0, 0, unixNow(), 0, statusText().c_str());
+    chSearch.nextStepAt = now + CH_DWELL_MS;
+    return;
+  }
+  bool quiet = gwLink.trk.lastHeard ? now - gwLink.trk.lastHeard > GW_SEARCH_AFTER_MS : now > GW_SEARCH_AFTER_MS;
+  if (!quiet) { endSearch(true); return; }
+  bool peerUp = peerLink.trk.online;
+  if (peerUp && MY_NODE != NODE_MOD_A) return;                 // Module A searches for both of us
+  if (hold) return;
+  if (!peerUp) {                                               // alone anyway: no reason to wait long
+    chSearch.waitMs = CH_SEARCH_MIN_MS;
+    if (notYet(chSearch.nextSearchAt) && chSearch.nextSearchAt - now > CH_SEARCH_MIN_MS)
+      chSearch.nextSearchAt = now + CH_SEARCH_MIN_MS;
+  }
+  if (notYet(chSearch.nextSearchAt)) return;
+  chSearch.active = true;
+  chSearch.homeCh = radioCh;
+  chSearch.step = 0;
+  chSearch.startedAt = now;
+  chSearch.nextStepAt = now;
+}
+#endif
+
 void linkLoop(uint32_t now) {
   if (!radioReady) return;
 #if WOKWI_SIM
@@ -706,6 +820,9 @@ void linkLoop(uint32_t now) {
   while (xQueueReceive(rxQueue, &it, 0) == pdTRUE) handlePacket(it);
   checkLinkTimeout(gwLink);
   checkLinkTimeout(peerLink);
+#if !WOKWI_SIM
+  channelLoop(now);
+#endif
 
   if (alarmMine && state == S_INTRUSION && !notYet(nextAlarmCopyAt)) {
     linkSend(peerLink, L_PEER_ALARM, 0, 0, 0, alarmNo, 0, alarmWhy.c_str());
@@ -855,6 +972,7 @@ String statusText() {
   s += String(",PEER:") + (peerLink.trk.online ? "UP" : "DOWN");
   s += String(",LOCK:") + String(lockoutRemainingS);
   s += String(",LOGNO:") + String(logNo);
+  s += String(",CH:") + String(radioCh);
   return s;
 }
 

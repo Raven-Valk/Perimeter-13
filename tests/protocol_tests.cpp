@@ -64,7 +64,7 @@ int main(){
   CHECK(moduleA(mk(NODE_GATEWAY,NODE_MOD_A,L_CMD,G1,4,0,K_AGW,CMD_DISARM,R_OPERATOR))==R_STALE, "Command with unknown boot (0): rejected");
   CHECK(moduleA(mk(NODE_GATEWAY,NODE_MOD_A,L_ACK,G1,5,0,K_AGW))==ACCEPT, "Plain ACK needs no boot binding: accepted");
   CHECK(moduleA(mk(NODE_GATEWAY,NODE_MOD_B,L_CMD,G1,6,MY_BOOT,K_BGW,CMD_DISARM,R_OPERATOR))==IGNORE, "Packet for Module B: ignored by A");
-  CHECK(moduleA(mk(NODE_DONGLE,NODE_MOD_A,L_CMD,5,1,MY_BOOT,K_AGW,CMD_DISARM,R_OPERATOR))==R_UNKNOWN, "PC dongle talking to A directly: unknown sender");
+  CHECK(moduleA(mk(NODE_SERVER,NODE_MOD_A,L_CMD,5,1,MY_BOOT,K_AGW,CMD_DISARM,R_OPERATOR))==R_UNKNOWN, "server talking to A directly: unknown sender");
   CHECK(moduleA(mk(NODE_MOD_B,NODE_MOD_A,L_PEER_EVENT,BB1,1,MY_BOOT,K_AB,ZONE_WALL))==R_REPLAY, "Peer event before B's HELLO: waits (not acted on)");
   CHECK(moduleA(mk(NODE_MOD_B,NODE_MOD_A,L_HELLO,BB1,2,0,K_AB))==ACCEPT, "Module B HELLO: link syncs");
   CHECK(moduleA(mk(NODE_MOD_B,NODE_MOD_A,L_PEER_EVENT,BB1,3,MY_BOOT,K_AB,ZONE_WALL))==ACCEPT, "Peer WALL event from B: accepted");
@@ -87,7 +87,7 @@ int main(){
 
   printf("\n-- PC link (gateway <-> dongle) --\n");
   static const uint8_t K_PC[32] = {5,5,5};
-  LinkPacket pc=mk(NODE_DONGLE,NODE_GATEWAY,L_PC_CMD,BB1,1,0x6060,K_PC,CMD_DISARM,R_NONE);
+  LinkPacket pc=mk(NODE_SERVER,NODE_GATEWAY,L_PC_CMD,BB1,1,0x6060,K_PC,CMD_DISARM,R_NONE);
   pc.session=0x1234; pc.target=TARGET_BOTH; linkSign(K_PC,32,pc,pc.sig);
   CHECK(linkWellFormed(pc,sizeof(pc)), "PC command packet (type 13) is well-formed");
   v=pc; v.type=L_TYPE_MAX+1; CHECK(!linkWellFormed(v,sizeof(v)), "Type 14 rejected");

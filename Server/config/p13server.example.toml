@@ -1,0 +1,23 @@
+# Project 13 server settings. scripts/setup.py writes config/p13server.toml for
+# you (with real keys and passwords); this file only shows what is in it.
+site_id = "site1"                  # up to 20 characters; part of the gateway's topic names
+mode = "hardware"                  # "hardware": the real gateway   "wokwi": the Wokwi simulator
+
+[gateway]
+key = "64 hex characters"          # = KEY_GW_SERVER in Gateway/secrets.h
+
+[mqtt]
+host = "127.0.0.1"                 # the broker on this computer
+port = 1883
+user = "p13-server"
+password = "from setup.py"
+
+[web]
+host = "0.0.0.0"
+port = 8443
+cert = "certs/server.crt"          # leave out cert and key for plain HTTP (testing on this computer only)
+key = "certs/server.key"
+session_hours = 12
+
+[storage]
+data_dir = "data"

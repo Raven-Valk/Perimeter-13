@@ -6,7 +6,7 @@
 | `diagram.json` | replaces `diagram.json`. ESP32 DevKitC 38-pin, LCD, keypad, 2 PIRs, slide switch as the tamper, buzzer, 3 LEDs |
 | `libraries.txt` | new file with the same name (Keypad, LiquidCrystal I2C, PubSubClient) |
 
-The sketch already has `WOKWI_SIM 1` and `BENCH_COMMANDS 1`. **Don't upload it to a real board.** Use the firmware folder for that.
+The sketch already has `WOKWI_SIM 1` and `BENCH_COMMANDS 1`. **Don't upload it to a real board.** Use the firmware folder for that. This sketch is generated from the firmware by `Tools/make_wokwi.py`.
 
 ## Set up (about 5 minutes)
 

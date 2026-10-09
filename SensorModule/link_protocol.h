@@ -1,19 +1,20 @@
 // =====================================================================
-//  link_protocol.h  —  v3, shared by ALL boards of Project 13:
-//    Sensor Module A, Sensor Module B, Gateway, PC dongle.
-//  Keep this file IDENTICAL in every sketch folder.
+//  link_protocol.h  —  v3 (firmware 5.4), shared by every part of Project 13:
+//    Sensor Module A, Sensor Module B, Gateway, and the server (Server/p13server/protocol.py
+//    is the same format in Python). Keep this file IDENTICAL in every sketch folder.
 //
-//  Links:  Module A <-> Module B,  Module A/B <-> Gateway,  Gateway <-> PC dongle.
+//  Links:  Module A <-> Module B,  Module A/B <-> Gateway   (ESP-NOW radio)
+//          Gateway <-> Server                               (Wi-Fi, MQTT over TLS)
 //
 //  Every packet is:
 //    * signed with HMAC-SHA256 using the key of that one link
-//      (A<->B, A<->Gateway, B<->Gateway, Gateway<->PC each have their own key),
+//      (A<->B, A<->Gateway, B<->Gateway, Gateway<->Server each have their own key),
 //    * numbered (bootId + seq) so copies and old packets are rejected,
 //    * addressed (src + dst), so a packet for A can't be fed to B,
 //    * for commands and alarms: tied to the receiver's CURRENT boot (dstBoot),
 //      so a command recorded earlier can't be replayed after a restart.
-//  On real hardware ESP-NOW also encrypts each link (AES) once the board
-//  MAC addresses are filled in secrets.h.
+//  On real hardware ESP-NOW also encrypts each radio link (AES) once the board
+//  MAC addresses are filled in secrets.h, and the server link runs inside TLS.
 // =====================================================================
 #pragma once
 #include <Arduino.h>
@@ -25,46 +26,53 @@
 struct LinkPacket;
 
 #define LINK_VERSION    3
-#define ESPNOW_CHANNEL  1      // every board must use the same Wi-Fi channel
+#define FIRMWARE_VERSION "5.4"
+#define ESPNOW_DEFAULT_CHANNEL 1  // until the gateway's Wi-Fi decides: the gateway uses its
+                                  // network's channel and the modules find it by themselves
 #define SIG_LEN         8      // bytes of HMAC-SHA256 kept in each packet
 #define LINK_TEXT_MAX   160    // one log line / status line
 
 // Wokwi simulator only (WOKWI_SIM 1): Wokwi can't do ESP-NOW between two
-// simulations, so the same signed packets travel over MQTT instead.
-// Each board listens on  <base>/to/<letter>  (A, B, G = gateway, P = PC dongle).
+// simulations, so the same signed packets travel over a public MQTT broker.
+// Each part listens on  <base>/to/<letter>  (A, B, G = gateway, P = server).
+// The real gateway uses the same topic layout on the server's own broker:
+//   p13/<SITE_ID>/to/G  and  p13/<SITE_ID>/to/P   (see Gateway/secrets.h).
 #define MQTT_BROKER      "broker.hivemq.com"
 #define MQTT_PORT        1883
 #define MQTT_TOPIC_BASE  "pinnacle13/p13-2d386efc/v5"
 
-enum LinkNode : uint8_t { NODE_NONE = 0, NODE_MOD_A = 1, NODE_MOD_B = 2, NODE_GATEWAY = 9, NODE_DONGLE = 10 };
+enum LinkNode : uint8_t { NODE_NONE = 0, NODE_MOD_A = 1, NODE_MOD_B = 2, NODE_GATEWAY = 9, NODE_SERVER = 10 };
 
 enum LinkType : uint8_t {
   L_HELLO      = 1,  // status beat that also says "this is my boot ID". At boot and every 10th beat.
   L_STATUS     = 2,  // status beat, every second: state, priority, health in text
   L_LOG        = 3,  // one event-log line (logNo = line number; code 1 = re-sent on request)
-  L_ACK        = 4,  // gateway -> module: reply to each status beat ("link alive")
+  L_ACK        = 4,  // gateway -> module: reply to each status beat ("link alive").
+                     //   HELLO / ACK from the gateway: code = its radio channel (0 = not said)
   L_PEER_EVENT = 5,  // module -> module: one of my zones fired (code = zone, arg = age in ms)
   L_PEER_ALARM = 6,  // module -> module: I confirmed an intrusion, sound too (arg = alarm no., text = why)
   L_CMD        = 7,  // gateway -> module: command (code = Cmd, role, arg, text = "user@source")
   L_CMD_RESULT = 8,  // result of a command (code = Cmd, result, arg = the command packet's seq, text = details)
-                     //   module -> gateway, and gateway -> PC
-  // ---- PC dongle <-> gateway ----
-  L_LOGIN_REQ    = 9,   // PC -> gateway: text = user name. Gateway answers with a challenge.
-  L_LOGIN_CHAL   = 10,  // gateway -> PC: text = 32 hex chars (16-byte random challenge)
-  L_LOGIN_RESP   = 11,  // PC -> gateway: text = "user:" + hex(HMAC-SHA256(pwHash, challenge || user))
-  L_LOGIN_RESULT = 12,  // gateway -> PC: result OK/DENIED, role, session = new session ID (0 = none), text = message
-  L_PC_CMD       = 13,  // PC -> gateway: code = Cmd, target, arg, session = session ID
+                     //   module -> gateway, and gateway -> server
+  // ---- server <-> gateway ----
+  L_LOGIN_REQ    = 9,   // server -> gateway: text = user name. Gateway answers with a challenge.
+  L_LOGIN_CHAL   = 10,  // gateway -> server: text = 32 hex chars (16-byte random challenge)
+  L_LOGIN_RESP   = 11,  // server -> gateway: text = "user:" + hex(HMAC-SHA256(pwHash, challenge || user))
+  L_LOGIN_RESULT = 12,  // gateway -> server: result OK/DENIED, role, session = new session ID (0 = none), text = message
+  L_PC_CMD       = 13,  // server -> gateway: code = Cmd, target, arg, session = session ID
   L_TYPE_MAX     = 13
 };
-//  PC password: the gateway stores
+//  Dashboard password: the gateway stores
 //      pwHash = PBKDF2-HMAC-SHA256(password, salt = "p13-pc:" + user, 100000 rounds, 32 bytes)
-//  (hex). Only the PC ever computes it (slow on purpose, so guessing is slow).
-//  The password never travels; the PC proves it knows it by answering the random
-//  challenge. Status to the PC: L_STATUS with code = the node it describes.
+//  (hex). Only the server computes it, from the password typed into the dashboard
+//  (slow on purpose, so guessing is slow). The password never reaches the gateway;
+//  the server proves it knows it by answering the random challenge.
+//  Status to the server: L_STATUS with code = the node it describes.
 //
 //  L_CMD (gateway -> module): logNo = command ID (the same on every retry; the
 //  module answers a repeat with its first result instead of running it twice;
 //  0 = no ID). For CMD_RESEND_LOG: arg = first line, session = last line (0 = no limit).
+//  The same holds for CMD_RESEND_LOG in L_PC_CMD (server -> gateway).
 
 enum Cmd : uint8_t {
   CMD_ARM = 1, CMD_DISARM = 2,
@@ -74,7 +82,7 @@ enum Cmd : uint8_t {
   CMD_CLEAR_FAULT = 6,   // clear tamper / fault (MAINTENANCE only)
   CMD_SET_TIME = 7,      // arg = Unix time (seconds)
   CMD_RESEND_LOG = 8,    // arg = first log line number wanted
-  CMD_LOGOUT = 9,        // PC -> gateway: end the session
+  CMD_LOGOUT = 9,        // server -> gateway: end the session
   CMD_MAX = 9
 };
 // Command target (L_PC_CMD): 0 = both modules, or NODE_MOD_A / NODE_MOD_B / NODE_GATEWAY
@@ -228,7 +236,7 @@ struct PeerTracker {
 
 inline char nodeLetter(uint8_t n) {
   switch (n) { case NODE_MOD_A: return 'A'; case NODE_MOD_B: return 'B';
-               case NODE_GATEWAY: return 'G'; case NODE_DONGLE: return 'P'; default: return '?'; }
+               case NODE_GATEWAY: return 'G'; case NODE_SERVER: return 'P'; default: return '?'; }
 }
 
 inline const char* roleName(uint8_t r) {

@@ -13,7 +13,9 @@
 
 // ---------- Link keys (32 bytes each, one per radio link) ----------
 // KEY_A_GW / KEY_B_GW must be the SAME bytes as KEY_MOD_GW in each module's
-// secrets.h. KEY_GW_PC must match the PC dongle.
+// secrets.h. KEY_GW_SERVER must be the same bytes as gateway_key in the
+// server's config (Server/config/p13server.toml) — Server/scripts/setup.sh
+// prints both forms for you.
 // Make new ones:  python3 -c "import os;print(', '.join('0x%02X'%b for b in os.urandom(32)))"
 static const uint8_t KEY_A_GW[32] = {   // Module A <-> Gateway
   0x5B, 0x9F, 0x34, 0x83, 0xC7, 0x94, 0xF8, 0x33, 0xF0, 0xDA, 0x2E, 0xB7, 0x62, 0xAE, 0x36, 0x09,
@@ -23,7 +25,7 @@ static const uint8_t KEY_B_GW[32] = {   // Module B <-> Gateway
   0xB2, 0x37, 0x39, 0x02, 0xB5, 0x83, 0x00, 0xCC, 0xFC, 0x53, 0x8E, 0x72, 0x5B, 0x02, 0x05, 0x7C,
   0x18, 0xCB, 0xDD, 0x7F, 0x31, 0x83, 0x85, 0xE1, 0x3D, 0xB0, 0x9B, 0x38, 0x58, 0x40, 0x8E, 0xCE
 };
-static const uint8_t KEY_GW_PC[32] = {  // Gateway <-> PC dongle
+static const uint8_t KEY_GW_SERVER[32] = {  // Gateway <-> Server (dashboard)
   0xF2, 0x3E, 0xAB, 0xA5, 0x27, 0xC7, 0xE0, 0x35, 0xA8, 0x17, 0x8E, 0xC4, 0x27, 0xF5, 0x04, 0xD0,
   0x91, 0x60, 0x1A, 0xBA, 0xCC, 0x93, 0x9E, 0x6A, 0x71, 0x7D, 0x14, 0xE8, 0x8D, 0xAB, 0xB7, 0x1E
 };
@@ -39,7 +41,23 @@ static const uint8_t ESPNOW_PMK[16] = {
 static const uint8_t MAC_MOD_A[6]   = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
 static const uint8_t MAC_MOD_B[6]   = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
 static const uint8_t MAC_GATEWAY[6] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
-static const uint8_t MAC_DONGLE[6]  = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+
+// ---------- Wi-Fi + server (the laptop that runs the dashboard) ----------
+// The gateway joins this Wi-Fi network (laptop hotspot or router; 2.4 GHz only)
+// and connects to the server's MQTT broker over TLS. WIFI_SSID "" = no server link.
+#define WIFI_SSID      ""
+#define WIFI_PASSWORD  ""
+#define SERVER_HOST    "192.168.137.1"   // the laptop's address on that network
+#define SERVER_PORT    8883
+#define SERVER_NAME    "p13-server"      // name in the server's certificate (not a DNS name)
+#define MQTT_USER      "gateway"
+#define MQTT_PASSWORD  ""                // printed by Server/scripts/setup.sh
+#define SITE_ID        "site1"           // up to 20 characters. Topics: p13/<SITE_ID>/to/G and /to/P
+
+// The CA certificate that signed the server's certificate (Server/certs/ca.crt,
+// printed by setup.sh). The gateway only talks to a server holding a
+// certificate from this CA. Empty = server link off (it never connects unchecked).
+static const char SERVER_CA_PEM[] = "";
 
 // ---------- RFID cards + PINs (gateway keypad) ----------
 // PINs are stored as SHA-256(PIN_SALT + PIN). Use the same salt and hashes as
@@ -61,8 +79,9 @@ static const CardUser USERS[] = {
 };
 static const uint8_t USER_COUNT = sizeof(USERS) / sizeof(USERS[0]);
 
-// ---------- PC dashboard accounts ----------
-// Stored as PBKDF2-HMAC-SHA256(password, salt "p13-pc:" + user, 100000 rounds),
+// ---------- Dashboard accounts ----------
+// The dashboard asks for these. The gateway checks them (the server never stores
+// them). Stored as PBKDF2-HMAC-SHA256(password, salt "p13-pc:" + user, 100000 rounds),
 // never the password itself. Use long passwords for the real demo. Hash for a new one:
 //   python3 -c "import hashlib;print(hashlib.pbkdf2_hmac('sha256',b'admin123',b'p13-pc:admin',100000).hex())"
 //  user        PBKDF2 hash (hex)                                                     role

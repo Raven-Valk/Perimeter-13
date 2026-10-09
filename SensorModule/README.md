@@ -1,4 +1,4 @@
-# Project 13: Sensor Module firmware (v4.3)
+# Project 13: Sensor Module firmware (v5)
 
 One sketch runs on **both** sensor modules. The only line that differs between them is near the top of `SensorModule.ino`:
 
@@ -9,7 +9,7 @@ One sketch runs on **both** sensor modules. The only line that differs between t
 | File | What it is |
 |---|---|
 | `SensorModule.ino` | the module firmware |
-| `link_protocol.h` | the shared radio protocol (v3). The gateway and PC dongle use the **same file** |
+| `link_protocol.h` | the shared radio protocol (v3). The gateway uses the **same file**; the server has the same format in Python |
 | `secrets.h` | link keys, board MAC addresses, PIN hashes. **Never upload it to GitHub** |
 
 Libraries (Arduino Library Manager): **Keypad** (Mark Stanley, Alexander Brevig) and **LiquidCrystal I2C** (Frank de Brabander). Board: **ESP32 Dev Module**.
@@ -33,10 +33,12 @@ A single trigger is only a warning (P1): a short beep, the yellow LED, and the L
 
 | Action | How |
 |---|---|
-| Arm, disarm, maintenance mode | **Only at the gateway** (card + PIN) or from the logged-in PC. The module still checks the role and its own state. For example, it never arms with the lid open or a PIR stuck. |
-| Clear a tamper or fault | **Either** at the gateway (maintenance card + PIN, or the PC) **or** on this module's keypad with a **MAINTENANCE PIN**, then **#**. The lid must be shut. An operator PIN is refused and logged. The module then runs its self-test and returns to the mode it was in (armed or disarmed). |
+| Arm, disarm, maintenance mode | **Only at the gateway** (card + PIN) or from the dashboard. The module still checks the role and its own state. For example, it never arms with the lid open or a PIR stuck. |
+| Clear a tamper or fault | **Either** at the gateway (maintenance card + PIN, or the dashboard) **or** on this module's keypad with a **MAINTENANCE PIN**, then **#**. The lid must be shut. An operator PIN is refused and logged. The module then runs its self-test and returns to the mode it was in (armed or disarmed). |
 | Silence this module's alarm | Any valid PIN, then **#**, on this module's keypad. It silences this module only. |
 | Wrong PINs (alarm or tamper) | 3 wrong PINs lock the keypad for 60 s, then 120 s, then 240 s. The lockout survives a restart. |
+
+**Radio channel.** The gateway's radio runs on its Wi-Fi network's channel, and that can change (a laptop hotspot follows the laptop's own Wi-Fi). When the gateway has been silent for 8 s, the module steps through the other channels. On each one it sends the gateway a HELLO and listens for 0.16 s. When the gateway answers, the module stays on that channel, remembers it, and logs "Gateway found on channel N". If no channel answers, it returns to its own channel (where the other module most likely is) and tries again after 10, 20, 40 and then every 60 s. The status line shows the channel (`CH:`).
 
 **If the gateway or the other module goes offline,** this module keeps detecting and sounding. The LCD shows "GW link DOWN" or "Module B DOWN". Without the other module, a WALL trigger can only be confirmed by the 3-hit rule or the module's own SIDE PIR.
 
@@ -79,9 +81,9 @@ The PIRs and the tamper switch are on normal pins and use the ESP32's **built-in
 
 1. Wire both modules the same way.
 2. Upload with `MODULE_ID 'A'` to one board and with `'B'` to the other. Label the boards.
-3. Open Serial Monitor (115200). Each board prints `Sensor Module A, MAC 24:6F:28:…`, and the gateway prints `Gateway, MAC …`. Write all three down (four once the PC dongle exists).
+3. Open Serial Monitor (115200). Each board prints `Sensor Module A, MAC 24:6F:28:…`, and the gateway prints `Gateway, MAC …`. Write all three down.
 4. Put the MACs into `secrets.h` on **every** board:
-   - `MAC_MOD_A`, `MAC_MOD_B` and `MAC_GATEWAY` (and `MAC_DONGLE` on the gateway), written as `0x24, 0x6F, …`.
+   - `MAC_MOD_A`, `MAC_MOD_B` and `MAC_GATEWAY`, written as `0x24, 0x6F, …`.
    - Upload all boards again.
    - From then on every link is **encrypted**, and packets from any other MAC are refused.
 5. **Until the MACs are set, the radio links stay OFF.** The log says "MAC not set in secrets.h: link OFF". That's on purpose: the boards never send anything readable over the air.

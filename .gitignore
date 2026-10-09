@@ -1,6 +1,13 @@
+# Keys and passwords: never commit these
 secrets.h
-events_*.csv
-*.db
+Server/certs/
+Server/config/p13server.toml
+Server/config/mosquitto/
+Server/gateway_secrets.txt
 
+# Data and local environments
+Server/data/
+Server/.venv/
 __pycache__/
-*.pyc
+*.db
+events_*.csv

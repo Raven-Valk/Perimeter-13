@@ -1,14 +1,14 @@
-# Project 13: Gateway firmware (v4.3)
+# Project 13: Gateway firmware (v5)
 
-The control box: an ESP32 DevKit V1 (30-pin) on a 5 V adapter, with the RFID reader, 4×4 keypad, 16×2 LCD, a tamper switch and 3 LEDs (no buzzer). It talks by radio to Module A, Module B and the PC dongle.
+The control box: an ESP32 DevKit V1 (30-pin) on a 5 V adapter, with the RFID reader, 4×4 keypad, 16×2 LCD, a tamper switch and 3 LEDs (no buzzer). It talks by radio (ESP-NOW) to Module A and Module B, and over Wi-Fi to the server laptop that runs the dashboard.
 
 | File | What it is |
 |---|---|
 | `Gateway.ino` | the gateway firmware |
 | `link_protocol.h` | the shared radio protocol. **Must be identical** to the one in `SensorModule/` |
-| `secrets.h` | link keys, MACs, card UIDs + PIN hashes, PC accounts. **Never upload it to GitHub** |
+| `secrets.h` | link keys, MACs, card UIDs + PIN hashes, dashboard accounts, Wi-Fi and server settings. **Never upload it to GitHub** |
 
-Libraries: **MFRC522** (GithubCommunity), **Keypad** (Mark Stanley, Alexander Brevig), **LiquidCrystal I2C** (Frank de Brabander). Board: **ESP32 Dev Module**.
+Libraries: **MFRC522** (GithubCommunity), **Keypad** (Mark Stanley, Alexander Brevig), **LiquidCrystal I2C** (Frank de Brabander). The server link uses ESP-MQTT, which comes with the ESP32 core (3.x). Board: **ESP32 Dev Module**.
 
 ## What it does
 
@@ -26,30 +26,37 @@ Libraries: **MFRC522** (GithubCommunity), **Keypad** (Mark Stanley, Alexander Br
 
 - **One command per card tap.** The menu closes after 20 s without a key.
 - **3 wrong card/PIN tries lock the keypad.** The lock lasts 60 s, then 120 s, 240 s, and so on up to 960 s, and survives a restart.
-- **There is no PIN-only login here.** If the RFID reader fails, use the PC.
+- **There is no PIN-only login here.** If the RFID reader fails, use the dashboard.
 
 **Each command goes to the modules, and their answers come back to the LCD.** For example "ARM OK, A:OK B:OK", or "ARM FAILED, A:OK B:Lid open". If a module's reply is lost, the gateway sends the command again; the module recognises the repeat and doesn't run it twice. Each module still checks the role and its own state, so the gateway can't make a module arm with its lid open.
 
-**From the PC (once the dongle is built):**
-- **Login:** user name and password, checked here by the gateway. The password never travels over the air; the PC proves it knows it by answering a random challenge.
-- **Lockout:** 3 wrong tries lock PC logins, the same way as the keypad. That lock is separate from the keypad's.
-- **Sessions:** one at a time. A session ends after 5 min idle, after 30 min in total, or if the PC link drops.
+**From the dashboard (the server laptop):**
+- **Sign-in:** user name and password, checked here by the gateway. The password never reaches the gateway; the server proves it knows it by answering a random challenge.
+- **Lockout:** 3 wrong tries lock dashboard sign-ins, the same way as the keypad. That lock is separate from the keypad's.
+- **Sessions:** one at a time. A session ends after 5 min idle, after 30 min in total, when someone else signs in, or if the server link drops.
 - **Same rules as the keypad:** roles, the commands above, and the same checks.
-- **PC has priority:** a PC command cancels a half-typed keypad entry. If a keypad command is already being sent, the PC command runs straight after it.
+- **The dashboard has priority:** its command cancels a half-typed keypad entry. If a keypad command is already being sent, the dashboard's command runs straight after it.
 
-Demo PC accounts (change them in `secrets.h`):
+Demo dashboard accounts (change them in `secrets.h`):
 
 | User | Password | Role |
 |---|---|---|
 | `operator` | `operator123` | OPERATOR |
 | `admin` | `admin123` | MAINTENANCE |
 
-**Gateway tamper:** opening the gateway's lid raises **P3** (red LED flashing, "!! GW TAMPER !!"). The gateway then **refuses every command** until a MAINTENANCE card + PIN (or a PC maintenance user) clears it, with the lid shut. A restart doesn't clear it.
+**Wi-Fi and the server link:**
+- **Joining:** at power-on the gateway joins the Wi-Fi network in `secrets.h` (laptop hotspot or router, 2.4 GHz) and the LCD shows the channel and its IP address for a few seconds.
+- **The connection:** it connects to the broker on the server laptop with MQTT inside TLS, and checks the server's certificate against the CA in `secrets.h` and the name `p13-server`. It never connects to anything else.
+- **Radio channel:** ESP-NOW runs on the Wi-Fi network's channel. The modules find that channel by themselves (see `SensorModule/README.md`).
+- **If the Wi-Fi network is gone:** the gateway stays on the last channel, so the modules keep their link, and tries again after 30 s, 60 s, 2 min, 4 min, then every 5 min. Every attempt and its outcome goes into the log.
+- **What keeps working without Wi-Fi:** the keypad, the card reader and the module links. The dashboard catches up on the log when the link is back.
+
+**Gateway tamper:** opening the gateway's lid raises **P3** (red LED flashing, "!! GW TAMPER !!"). The gateway then **refuses every command** until a MAINTENANCE card + PIN (or a dashboard maintenance user) clears it, with the lid shut. A restart doesn't clear it.
 
 **One event log for the whole system:**
 - **What goes in:** every event from the gateway, Module A and Module B, numbered in one sequence (`gw_no`). It's kept in the gateway's flash (~5,000 lines) and printed on USB as `LOG,…`.
 - **Missing lines:** if the radio drops some module lines, the gateway notices the gap and asks that module to send them again. No line is stored twice. Lines that can't be recovered are logged as `LOST`.
-- **For the PC:** the gateway sends every line, and the PC can ask for any it missed.
+- **For the server:** the gateway sends every line, and the server asks for any it missed.
 
 ## LEDs and LCD
 
@@ -79,7 +86,7 @@ A:ARM B:ARM PC:Y
 | `BT` | starting |
 | `--` | not connected |
 
-`PC:Y` means the PC is connected, `PC:L` means a user is logged in, and `PC:N` means no PC.
+`PC:Y` means the server is connected, `PC:L` means someone has control from the dashboard, and `PC:N` means no server link.
 
 ## Pin map: ESP32 DevKit V1, 30-pin
 
@@ -113,13 +120,14 @@ The RFID reader, keypad and LCD use the same pins as Board 1 before. The tamper 
    - Set `#define ENROLL_MODE 1`, upload, and tap each card. Serial Monitor prints `ENROLL card UID: 0x.., 0x.., …`.
    - Put the UIDs into `USERS` in `secrets.h` (the `#else` part). Set `ENROLL_MODE 0` and upload again.
 3. **MACs:**
-   - Put all the board MACs into `secrets.h` on **every** board: `MAC_MOD_A`, `MAC_MOD_B`, `MAC_GATEWAY`, and `MAC_DONGLE` on the gateway.
+   - Put all the board MACs into `secrets.h` on **every** board: `MAC_MOD_A`, `MAC_MOD_B` and `MAC_GATEWAY`.
    - Until then, the radio links stay **OFF** and the log says "link OFF".
    - For a quick first test you can set `#define ALLOW_UNENCRYPTED 1`. Set it back to 0 for the demo.
 4. **Keys:**
    - `KEY_A_GW` and `KEY_B_GW` here must be the same bytes as `KEY_MOD_GW` in each module's `secrets.h`. The demo files already match.
    - If you make new keys, change both sides.
-5. **PC passwords:** make a new hash with the one-line command in `secrets.h`. Use long passwords for the real demo.
+5. **Server link:** install the server (`Server/README.md`). Its setup writes `gateway_secrets.txt`: paste that into `secrets.h` (it sets `KEY_GW_SERVER`, the broker password, `SITE_ID`, `SERVER_HOST` and `SERVER_CA_PEM`). Fill in `WIFI_SSID` and `WIFI_PASSWORD` yourself, then upload. Serial Monitor shows "Wi-Fi joined ..." and then "Server link connected (TLS)".
+6. **Dashboard passwords:** make a new hash with the one-line command in `secrets.h`. Use long passwords for the real demo.
 
 ## Test script (gateway + both modules)
 
@@ -140,6 +148,11 @@ The RFID reader, keypad and LCD use the same pins as Board 1 before. The tamper 
 | T09 Module lost | switch Module B off while armed | `B:--`; red blinks; log "Module B LOST while armed" (P3) |
 | Log recovery | switch the gateway off; make a few events on A; switch it back on | within a few seconds those lines appear in the gateway's log (`LOG,…` on USB) |
 | T08 Fake board | change one byte of `KEY_A_GW` in the gateway, upload | log "Module A: bad signature (spoofed?) REJECTED"; `A:--` |
+| Server link | power on with Wi-Fi + server set | LCD "Wi-Fi ch N" + IP, then `PC:Y`; dashboard "Gateway link: Up" |
+| Dashboard command | sign in as `operator`, press Arm | dashboard "Armed. A: OK, B: OK"; gateway LCD "Web ARM OK" |
+| Server gone | stop the server, wait 10 s, start it | `PC:N`, then `PC:Y`; the dashboard's log has no gaps |
+| Wi-Fi gone | switch the hotspot off | log "Wi-Fi lost: rejoining", "... not found: retry in 30 s"; modules stay linked |
+| Wrong server | in `secrets.h` set `SERVER_NAME` to `"someone-else"`, upload | log "Server link: TLS check failed"; never connects |
 
 ## Log format
 
@@ -151,11 +164,13 @@ gw_no,log_no,boot,uptime_ms,unix_time,module,priority,state,type,event,zone,user
 
 - `module` is A, B, or G (the gateway).
 - For the gateway's own lines, `log_no` equals `gw_no`.
-- `unix_time` is 0 until the PC has sent the real time.
+- `unix_time` is 0 until the server has sent the real time.
 
 ## Known limits (for your report)
 
 - **Keys, PIN hashes and password hashes in flash:** anyone who has the gateway in hand can read them out. Opening the lid raises P3. ESP32 flash encryption fixes this, but it can't be undone, so leave it off the demo boards.
 - **Radio jamming:** it can't be prevented, but it is detected ("LOST while armed", P3). The modules keep alarming on their own.
-- **PC passwords:** they're protected by a slow hash, but a weak password can still be guessed offline from a stolen gateway. Use long ones.
+- **Dashboard passwords:** they're protected by a slow hash, but a weak password can still be guessed offline from a stolen gateway. Use long ones.
+- **Wi-Fi password and broker password in flash:** the same applies. Someone holding the gateway can read them, but not the server's private keys (the gateway only holds the CA certificate).
+- **While the gateway rejoins Wi-Fi** (a few seconds per attempt) its radio scans other channels, so a module link can drop briefly. Alarms keep working on the modules.
 - **`ALLOW_UNENCRYPTED 1` and `ENROLL_MODE 1` are for setup only.** Both are logged as warnings at every boot.

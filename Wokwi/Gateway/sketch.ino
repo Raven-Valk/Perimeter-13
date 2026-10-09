@@ -1,30 +1,36 @@
 // =====================================================================
 //  PINNACLE 1 — PROJECT 13 — SECURE PERIMETER INTRUSION DETECTION
-//  GATEWAY  —  ESP32 DevKit V1 30-pin  —  firmware v5
+//  GATEWAY  —  ESP32 DevKit V1 30-pin  —  firmware v5.4
 //
 //  The control box. Runs on a power adapter; talks by radio (ESP-NOW) to
-//  Sensor Module A, Sensor Module B and the PC dongle.
+//  Sensor Module A and Sensor Module B, and over Wi-Fi to the server laptop
+//  that runs the dashboard (MQTT inside TLS, the server's own broker).
 //
 //  What it does:
 //    * Card + PIN on its own RFID reader and keypad, then a menu:
 //        1 Arm   2 Disarm   3 Acknowledge alarm      (OPERATOR or MAINTENANCE)
 //        4 Maintenance  5 Clear tamper  6 End maint  (4 and 5: MAINTENANCE only)
 //      3 wrong card/PIN tries lock the keypad (60, 120, 240 s...).
-//    * PC dashboard: user name + password login (challenge-response, the
-//      password never travels), 5-min idle session, own lockout. A PC command
-//      has priority over a keypad entry in progress.
+//    * Dashboard: user name + password login (challenge-response: the
+//      password never reaches the gateway), 5-min idle session, own lockout.
+//      A dashboard command has priority over a keypad entry in progress.
 //    * Sends each command to the modules, collects their answers and shows
 //      them ("A:OK B:Lid open"). The modules check role and state again.
 //    * Keeps one event log for the whole system (its own events + every line
 //      from both modules), fetches lines the modules sent while the radio
-//      dropped, and gives the PC any lines it missed.
-//    * Relays status (its own + both modules) to the PC every second and
-//      gives the modules the real time once the PC has sent it.
+//      dropped, and gives the server any lines it missed.
+//    * Relays status (its own + both modules) to the server every second and
+//      gives the modules the real time once the server has sent it.
 //    * Its own tamper switch: lid opened -> P3, and the gateway refuses all
-//      commands until a MAINTENANCE card + PIN (or PC admin) clears it.
+//      commands until a MAINTENANCE card + PIN (or dashboard admin) clears it.
+//    * Wi-Fi: joins the network in secrets.h. ESP-NOW then runs on that
+//      network's channel; the modules follow it by themselves. If the network
+//      is gone, the gateway stays on the last channel (modules keep working)
+//      and tries again every 30 s .. 5 min.
 //
 //  Libraries: MFRC522 (GithubCommunity), Keypad (Mark Stanley / Alexander
 //  Brevig), LiquidCrystal I2C (Frank de Brabander), PubSubClient (Wokwi only).
+//  The server link uses ESP-MQTT, which is built into the ESP32 core.
 //  Board: "ESP32 Dev Module".
 // =====================================================================
 
@@ -44,6 +50,10 @@
 #include <MFRC522.h>
 #include <Keypad.h>
 #include <LiquidCrystal_I2C.h>
+#if !WOKWI_SIM
+#include <mqtt_client.h>
+#include <esp_tls_errors.h>
+#endif
 
 // The Arduino IDE / Wokwi auto-insert function prototypes above the first
 // function in the sketch. Declare our own types before that point.
@@ -56,21 +66,22 @@ struct ModuleView;
 
 // ======== link_protocol.h (inlined for Wokwi: no extra files needed) ========
 // =====================================================================
-//  link_protocol.h  —  v3, shared by ALL boards of Project 13:
-//    Sensor Module A, Sensor Module B, Gateway, PC dongle.
-//  Keep this file IDENTICAL in every sketch folder.
+//  link_protocol.h  —  v3 (firmware 5.4), shared by every part of Project 13:
+//    Sensor Module A, Sensor Module B, Gateway, and the server (Server/p13server/protocol.py
+//    is the same format in Python). Keep this file IDENTICAL in every sketch folder.
 //
-//  Links:  Module A <-> Module B,  Module A/B <-> Gateway,  Gateway <-> PC dongle.
+//  Links:  Module A <-> Module B,  Module A/B <-> Gateway   (ESP-NOW radio)
+//          Gateway <-> Server                               (Wi-Fi, MQTT over TLS)
 //
 //  Every packet is:
 //    * signed with HMAC-SHA256 using the key of that one link
-//      (A<->B, A<->Gateway, B<->Gateway, Gateway<->PC each have their own key),
+//      (A<->B, A<->Gateway, B<->Gateway, Gateway<->Server each have their own key),
 //    * numbered (bootId + seq) so copies and old packets are rejected,
 //    * addressed (src + dst), so a packet for A can't be fed to B,
 //    * for commands and alarms: tied to the receiver's CURRENT boot (dstBoot),
 //      so a command recorded earlier can't be replayed after a restart.
-//  On real hardware ESP-NOW also encrypts each link (AES) once the board
-//  MAC addresses are filled in secrets.h.
+//  On real hardware ESP-NOW also encrypts each radio link (AES) once the board
+//  MAC addresses are filled in secrets.h, and the server link runs inside TLS.
 // =====================================================================
 #include <Arduino.h>
 #include <esp_task_wdt.h>
@@ -81,46 +92,53 @@ struct ModuleView;
 struct LinkPacket;
 
 #define LINK_VERSION    3
-#define ESPNOW_CHANNEL  1      // every board must use the same Wi-Fi channel
+#define FIRMWARE_VERSION "5.4"
+#define ESPNOW_DEFAULT_CHANNEL 1  // until the gateway's Wi-Fi decides: the gateway uses its
+                                  // network's channel and the modules find it by themselves
 #define SIG_LEN         8      // bytes of HMAC-SHA256 kept in each packet
 #define LINK_TEXT_MAX   160    // one log line / status line
 
 // Wokwi simulator only (WOKWI_SIM 1): Wokwi can't do ESP-NOW between two
-// simulations, so the same signed packets travel over MQTT instead.
-// Each board listens on  <base>/to/<letter>  (A, B, G = gateway, P = PC dongle).
+// simulations, so the same signed packets travel over a public MQTT broker.
+// Each part listens on  <base>/to/<letter>  (A, B, G = gateway, P = server).
+// The real gateway uses the same topic layout on the server's own broker:
+//   p13/<SITE_ID>/to/G  and  p13/<SITE_ID>/to/P   (see Gateway/secrets.h).
 #define MQTT_BROKER      "broker.hivemq.com"
 #define MQTT_PORT        1883
 #define MQTT_TOPIC_BASE  "pinnacle13/p13-2d386efc/v5"
 
-enum LinkNode : uint8_t { NODE_NONE = 0, NODE_MOD_A = 1, NODE_MOD_B = 2, NODE_GATEWAY = 9, NODE_DONGLE = 10 };
+enum LinkNode : uint8_t { NODE_NONE = 0, NODE_MOD_A = 1, NODE_MOD_B = 2, NODE_GATEWAY = 9, NODE_SERVER = 10 };
 
 enum LinkType : uint8_t {
   L_HELLO      = 1,  // status beat that also says "this is my boot ID". At boot and every 10th beat.
   L_STATUS     = 2,  // status beat, every second: state, priority, health in text
   L_LOG        = 3,  // one event-log line (logNo = line number; code 1 = re-sent on request)
-  L_ACK        = 4,  // gateway -> module: reply to each status beat ("link alive")
+  L_ACK        = 4,  // gateway -> module: reply to each status beat ("link alive").
+                     //   HELLO / ACK from the gateway: code = its radio channel (0 = not said)
   L_PEER_EVENT = 5,  // module -> module: one of my zones fired (code = zone, arg = age in ms)
   L_PEER_ALARM = 6,  // module -> module: I confirmed an intrusion, sound too (arg = alarm no., text = why)
   L_CMD        = 7,  // gateway -> module: command (code = Cmd, role, arg, text = "user@source")
   L_CMD_RESULT = 8,  // result of a command (code = Cmd, result, arg = the command packet's seq, text = details)
-                     //   module -> gateway, and gateway -> PC
-  // ---- PC dongle <-> gateway ----
-  L_LOGIN_REQ    = 9,   // PC -> gateway: text = user name. Gateway answers with a challenge.
-  L_LOGIN_CHAL   = 10,  // gateway -> PC: text = 32 hex chars (16-byte random challenge)
-  L_LOGIN_RESP   = 11,  // PC -> gateway: text = "user:" + hex(HMAC-SHA256(pwHash, challenge || user))
-  L_LOGIN_RESULT = 12,  // gateway -> PC: result OK/DENIED, role, session = new session ID (0 = none), text = message
-  L_PC_CMD       = 13,  // PC -> gateway: code = Cmd, target, arg, session = session ID
+                     //   module -> gateway, and gateway -> server
+  // ---- server <-> gateway ----
+  L_LOGIN_REQ    = 9,   // server -> gateway: text = user name. Gateway answers with a challenge.
+  L_LOGIN_CHAL   = 10,  // gateway -> server: text = 32 hex chars (16-byte random challenge)
+  L_LOGIN_RESP   = 11,  // server -> gateway: text = "user:" + hex(HMAC-SHA256(pwHash, challenge || user))
+  L_LOGIN_RESULT = 12,  // gateway -> server: result OK/DENIED, role, session = new session ID (0 = none), text = message
+  L_PC_CMD       = 13,  // server -> gateway: code = Cmd, target, arg, session = session ID
   L_TYPE_MAX     = 13
 };
-//  PC password: the gateway stores
+//  Dashboard password: the gateway stores
 //      pwHash = PBKDF2-HMAC-SHA256(password, salt = "p13-pc:" + user, 100000 rounds, 32 bytes)
-//  (hex). Only the PC ever computes it (slow on purpose, so guessing is slow).
-//  The password never travels; the PC proves it knows it by answering the random
-//  challenge. Status to the PC: L_STATUS with code = the node it describes.
+//  (hex). Only the server computes it, from the password typed into the dashboard
+//  (slow on purpose, so guessing is slow). The password never reaches the gateway;
+//  the server proves it knows it by answering the random challenge.
+//  Status to the server: L_STATUS with code = the node it describes.
 //
 //  L_CMD (gateway -> module): logNo = command ID (the same on every retry; the
 //  module answers a repeat with its first result instead of running it twice;
 //  0 = no ID). For CMD_RESEND_LOG: arg = first line, session = last line (0 = no limit).
+//  The same holds for CMD_RESEND_LOG in L_PC_CMD (server -> gateway).
 
 enum Cmd : uint8_t {
   CMD_ARM = 1, CMD_DISARM = 2,
@@ -130,7 +148,7 @@ enum Cmd : uint8_t {
   CMD_CLEAR_FAULT = 6,   // clear tamper / fault (MAINTENANCE only)
   CMD_SET_TIME = 7,      // arg = Unix time (seconds)
   CMD_RESEND_LOG = 8,    // arg = first log line number wanted
-  CMD_LOGOUT = 9,        // PC -> gateway: end the session
+  CMD_LOGOUT = 9,        // server -> gateway: end the session
   CMD_MAX = 9
 };
 // Command target (L_PC_CMD): 0 = both modules, or NODE_MOD_A / NODE_MOD_B / NODE_GATEWAY
@@ -284,7 +302,7 @@ struct PeerTracker {
 
 inline char nodeLetter(uint8_t n) {
   switch (n) { case NODE_MOD_A: return 'A'; case NODE_MOD_B: return 'B';
-               case NODE_GATEWAY: return 'G'; case NODE_DONGLE: return 'P'; default: return '?'; }
+               case NODE_GATEWAY: return 'G'; case NODE_SERVER: return 'P'; default: return '?'; }
 }
 
 inline const char* roleName(uint8_t r) {
@@ -361,7 +379,9 @@ struct PcUser   { const char* name; const char* pwHashHex; Role role; };
 
 // ---------- Link keys (32 bytes each, one per radio link) ----------
 // KEY_A_GW / KEY_B_GW must be the SAME bytes as KEY_MOD_GW in each module's
-// secrets.h. KEY_GW_PC must match the PC dongle.
+// secrets.h. KEY_GW_SERVER must be the same bytes as gateway_key in the
+// server's config (Server/config/p13server.toml) — Server/scripts/setup.sh
+// prints both forms for you.
 // Make new ones:  python3 -c "import os;print(', '.join('0x%02X'%b for b in os.urandom(32)))"
 static const uint8_t KEY_A_GW[32] = {   // Module A <-> Gateway
   0x5B, 0x9F, 0x34, 0x83, 0xC7, 0x94, 0xF8, 0x33, 0xF0, 0xDA, 0x2E, 0xB7, 0x62, 0xAE, 0x36, 0x09,
@@ -371,7 +391,7 @@ static const uint8_t KEY_B_GW[32] = {   // Module B <-> Gateway
   0xB2, 0x37, 0x39, 0x02, 0xB5, 0x83, 0x00, 0xCC, 0xFC, 0x53, 0x8E, 0x72, 0x5B, 0x02, 0x05, 0x7C,
   0x18, 0xCB, 0xDD, 0x7F, 0x31, 0x83, 0x85, 0xE1, 0x3D, 0xB0, 0x9B, 0x38, 0x58, 0x40, 0x8E, 0xCE
 };
-static const uint8_t KEY_GW_PC[32] = {  // Gateway <-> PC dongle
+static const uint8_t KEY_GW_SERVER[32] = {  // Gateway <-> Server (dashboard)
   0xF2, 0x3E, 0xAB, 0xA5, 0x27, 0xC7, 0xE0, 0x35, 0xA8, 0x17, 0x8E, 0xC4, 0x27, 0xF5, 0x04, 0xD0,
   0x91, 0x60, 0x1A, 0xBA, 0xCC, 0x93, 0x9E, 0x6A, 0x71, 0x7D, 0x14, 0xE8, 0x8D, 0xAB, 0xB7, 0x1E
 };
@@ -387,7 +407,23 @@ static const uint8_t ESPNOW_PMK[16] = {
 static const uint8_t MAC_MOD_A[6]   = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
 static const uint8_t MAC_MOD_B[6]   = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
 static const uint8_t MAC_GATEWAY[6] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
-static const uint8_t MAC_DONGLE[6]  = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+
+// ---------- Wi-Fi + server (the laptop that runs the dashboard) ----------
+// The gateway joins this Wi-Fi network (laptop hotspot or router; 2.4 GHz only)
+// and connects to the server's MQTT broker over TLS. WIFI_SSID "" = no server link.
+#define WIFI_SSID      ""
+#define WIFI_PASSWORD  ""
+#define SERVER_HOST    "192.168.137.1"   // the laptop's address on that network
+#define SERVER_PORT    8883
+#define SERVER_NAME    "p13-server"      // name in the server's certificate (not a DNS name)
+#define MQTT_USER      "gateway"
+#define MQTT_PASSWORD  ""                // printed by Server/scripts/setup.sh
+#define SITE_ID        "site1"           // topics: p13/<SITE_ID>/to/G and p13/<SITE_ID>/to/P
+
+// The CA certificate that signed the server's certificate (Server/certs/ca.crt,
+// printed by setup.sh). The gateway only talks to a server holding a
+// certificate from this CA. Empty = server link off (it never connects unchecked).
+static const char SERVER_CA_PEM[] = "";
 
 // ---------- RFID cards + PINs (gateway keypad) ----------
 // PINs are stored as SHA-256(PIN_SALT + PIN). Use the same salt and hashes as
@@ -409,8 +445,9 @@ static const CardUser USERS[] = {
 };
 static const uint8_t USER_COUNT = sizeof(USERS) / sizeof(USERS[0]);
 
-// ---------- PC dashboard accounts ----------
-// Stored as PBKDF2-HMAC-SHA256(password, salt "p13-pc:" + user, 100000 rounds),
+// ---------- Dashboard accounts ----------
+// The dashboard asks for these. The gateway checks them (the server never stores
+// them). Stored as PBKDF2-HMAC-SHA256(password, salt "p13-pc:" + user, 100000 rounds),
 // never the password itself. Use long passwords for the real demo. Hash for a new one:
 //   python3 -c "import hashlib;print(hashlib.pbkdf2_hmac('sha256',b'admin123',b'p13-pc:admin',100000).hex())"
 //  user        PBKDF2 hash (hex)                                                     role
@@ -446,6 +483,11 @@ const uint8_t LCD_ADDR            = 0x27;  // try 0x3F if the LCD stays blank
 const uint32_t LOOP_MS             = 20;
 const uint32_t STATUS_EVERY_MS     = 1000;
 const uint32_t LINK_TIMEOUT_MS     = WOKWI_SIM ? 8000 : 3000;
+const uint32_t SERVER_TIMEOUT_MS   = 8000;    // server link: Wi-Fi + broker in between
+const uint32_t RADIO_SETTLE_MS     = 25000;   // module link timeout while Wi-Fi scans / modules re-find the channel
+const uint32_t WIFI_JOIN_MS        = 15000;   // give up one attempt to join after this
+const uint32_t WIFI_RETRY_MIN_S    = 30;      // then wait 30, 60, 120, 240, 300 s
+const uint32_t WIFI_RETRY_MAX_S    = 300;
 const uint32_t TAMPER_DEBOUNCE_MS  = 60;
 const uint8_t  MAX_ATTEMPTS        = 3;
 const uint32_t BASE_LOCKOUT_S      = 60;      // 60, 120, 240, 480, 960
@@ -581,7 +623,7 @@ RfidReader rfid;
 Preferences prefs;
 uint32_t bootNo = 0, gwNo = 0;
 
-// One lockout counter (keypad and PC have one each). Survives restarts.
+// One lockout counter (keypad and dashboard have one each). Survives restarts.
 class Lockout {
 public:
   Lockout(const char* prefix_, const char* name_) : prefix(prefix_), name(name_) {}
@@ -630,17 +672,18 @@ private:
   }
 };
 Lockout kpLock("kp", "Keypad");
-Lockout pcLock("pc", "PC login");
+Lockout pcLock("pc", "Dashboard login");
 
-// Real time, once the PC has sent it (0 = not known yet)
+// Real time, once the server has sent it (0 = not known yet)
 bool     timeSynced = false;
 uint32_t timeBase = 0, timeBaseMs = 0;
 uint32_t unixNow() { return timeSynced ? timeBase + (millis() - timeBaseMs) / 1000 : 0; }
 
 // =====================================================================
-//  RADIO LINKS: Module A, Module B, PC dongle
+//  LINKS: Module A, Module B (ESP-NOW radio), Server (Wi-Fi + MQTT/TLS)
 // =====================================================================
-struct RxItem { uint8_t src[6]; int len; uint8_t data[sizeof(LinkPacket)]; };
+enum Via : uint8_t { VIA_RADIO = 0, VIA_MQTT = 1 };
+struct RxItem { uint8_t src[6]; int8_t rssi; uint8_t via; int len; uint8_t data[sizeof(LinkPacket)]; };
 QueueHandle_t rxQueue;
 const uint8_t BROADCAST[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
 
@@ -654,11 +697,13 @@ struct PeerLink {
   bool           encrypted = false;
   uint32_t       beats = 0;
   uint32_t       lastKick = 0;     // last HELLO sent to nudge a restarted module
+  int8_t         rssi = 0;         // signal of its last packet (radio links)
   PeerLink(uint8_t n, const char* nm, const uint8_t* m, const uint8_t* k) : node(n), name(nm), mac(m), key(k) {}
 };
-PeerLink linkA (NODE_MOD_A,  "Module A", MAC_MOD_A,  KEY_A_GW);
-PeerLink linkB (NODE_MOD_B,  "Module B", MAC_MOD_B,  KEY_B_GW);
-PeerLink linkPc(NODE_DONGLE, "PC",       MAC_DONGLE, KEY_GW_PC);
+const uint8_t NO_MAC[6] = { 0, 0, 0, 0, 0, 0 };
+PeerLink linkA (NODE_MOD_A,  "Module A", MAC_MOD_A, KEY_A_GW);
+PeerLink linkB (NODE_MOD_B,  "Module B", MAC_MOD_B, KEY_B_GW);
+PeerLink linkPc(NODE_SERVER, "Server",   NO_MAC,    KEY_GW_SERVER);   // over MQTT/TLS, not the radio
 PeerLink* const LINKS[3] = { &linkA, &linkB, &linkPc };
 PeerLink* linkFor(uint8_t node) {
   for (PeerLink* L : LINKS) if (L->node == node) return L;
@@ -726,8 +771,9 @@ bool     radioReady = false;
 
 bool macIsSet(const uint8_t* m) { for (int i = 0; i < 6; i++) if (m[i]) return true; return false; }
 
-// A link is only used when it is encrypted, unless ALLOW_UNENCRYPTED (Wokwi has no encryption).
-bool linkUsable(const PeerLink& L) { return WOKWI_SIM || ALLOW_UNENCRYPTED || L.encrypted; }
+// A radio link is only used when it is encrypted, unless ALLOW_UNENCRYPTED (Wokwi has no
+// encryption). The server link is always inside TLS.
+bool linkUsable(const PeerLink& L) { return WOKWI_SIM || ALLOW_UNENCRYPTED || L.encrypted || &L == &linkPc; }
 
 #if WOKWI_SIM
 #include <PubSubClient.h>
@@ -739,9 +785,185 @@ String topicFor(uint8_t node) { return String(MQTT_TOPIC_BASE) + "/to/" + nodeLe
 void onMqtt(char* topic, byte* payload, unsigned int len) {
   RxItem it;
   memset(it.src, 0, 6);
+  it.rssi = 0; it.via = VIA_MQTT;
   it.len = len;
   memcpy(it.data, payload, min((int)len, (int)sizeof(it.data)));
   xQueueSend(rxQueue, &it, 0);
+}
+#endif
+
+// ---------------- Wi-Fi + server link (real board) ----------------
+#if !WOKWI_SIM
+enum NetStage : uint8_t { NET_OFF, NET_JOINING, NET_UP, NET_WAIT };
+NetStage netStage = NET_OFF;
+uint8_t  netCh = ESPNOW_DEFAULT_CHANNEL;   // the channel ESP-NOW runs on (the network's, once joined)
+uint32_t netSince = 0, netRetryS = WIFI_RETRY_MIN_S;
+uint32_t radioSettleUntil = 0;             // until then, module links get RADIO_SETTLE_MS before "DOWN"
+
+esp_mqtt_client_handle_t mq = nullptr;
+QueueHandle_t txQueue = nullptr;              // packets waiting for the sender task
+char topicIn[48], topicOut[48], topicState[48];
+// Set by the MQTT task, read (and logged) by loop()
+volatile bool mqUp = false, mqSawConnect = false, mqSawDrop = false, mqSawError = false;
+volatile int  mqErrType = 0, mqTlsErr = 0, mqConnRc = 0;
+uint32_t mqLastErrLog = 0;
+
+void onMqttEvent(void*, esp_event_base_t, int32_t id, void* data) {   // runs in the MQTT task
+  esp_mqtt_event_handle_t ev = (esp_mqtt_event_handle_t)data;
+  switch ((esp_mqtt_event_id_t)id) {
+    case MQTT_EVENT_CONNECTED:
+      esp_mqtt_client_subscribe(ev->client, topicIn, 0);
+      esp_mqtt_client_publish(ev->client, topicState, "online", 0, 1, 1);
+      mqUp = true; mqSawConnect = true;
+      break;
+    case MQTT_EVENT_DISCONNECTED:
+      if (mqUp) mqSawDrop = true;
+      mqUp = false;
+      break;
+    case MQTT_EVENT_ERROR:
+      if (ev->error_handle) {
+        mqErrType = ev->error_handle->error_type;
+        mqTlsErr  = ev->error_handle->esp_tls_last_esp_err;
+        mqConnRc  = ev->error_handle->connect_return_code;
+      }
+      mqSawError = true;
+      break;
+    case MQTT_EVENT_DATA: {
+      bool ours = ev->topic_len == (int)strlen(topicIn) && memcmp(ev->topic, topicIn, ev->topic_len) == 0;
+      if (!ours || ev->current_data_offset != 0 || ev->data_len != ev->total_data_len) break;
+      RxItem it;
+      memset(it.src, 0, 6);
+      it.rssi = 0; it.via = VIA_MQTT;
+      it.len  = ev->data_len;
+      memcpy(it.data, ev->data, min(ev->data_len, (int)sizeof(it.data)));
+      xQueueSend(rxQueue, &it, 0);
+      break;
+    }
+    default: break;
+  }
+}
+
+// Sends what loop() queued. Publishing can wait on the network (a slow Wi-Fi
+// hop, a reconnect): it waits here, never in loop(), so the keypad, LEDs and
+// module links carry on.
+// A Wi-Fi scan takes the radio off the modules' channel for a few seconds, and
+// after a channel change the modules need a few seconds to find us. Neither is
+// a module going missing, so it must not raise "LOST while armed" (P3).
+uint32_t moduleLinkTimeout() {
+  return netStage == NET_JOINING || notYet(radioSettleUntil) ? RADIO_SETTLE_MS : LINK_TIMEOUT_MS;
+}
+
+void serverTxTask(void*) {
+  LinkPacket p;
+  for (;;) {
+    if (xQueueReceive(txQueue, &p, portMAX_DELAY) == pdTRUE && mq && mqUp)
+      esp_mqtt_client_publish(mq, topicOut, (const char*)&p, sizeof(p), 0, 0);
+  }
+}
+
+void serverStart() {                           // once; ESP-MQTT reconnects by itself after that
+  if (mq || !SERVER_CA_PEM[0]) return;
+  snprintf(topicIn,    sizeof(topicIn),    "p13/%s/to/G",    SITE_ID);
+  snprintf(topicOut,   sizeof(topicOut),   "p13/%s/to/P",    SITE_ID);
+  snprintf(topicState, sizeof(topicState), "p13/%s/state/G", SITE_ID);
+  static char uri[72], cid[40];
+  snprintf(uri, sizeof(uri), "mqtts://%s:%d", SERVER_HOST, SERVER_PORT);
+  snprintf(cid, sizeof(cid), "p13-gw-%s", SITE_ID);
+  esp_mqtt_client_config_t c = {};
+  c.broker.address.uri                 = uri;
+  c.broker.verification.certificate    = SERVER_CA_PEM;   // only our CA's certificates are accepted
+  c.broker.verification.common_name    = SERVER_NAME;     // and only the one issued to the server
+  c.credentials.client_id              = cid;
+  c.credentials.username               = MQTT_USER;
+  c.credentials.authentication.password = MQTT_PASSWORD;
+  c.session.keepalive                  = 10;
+  c.session.last_will.topic            = topicState;      // the broker announces "offline" if we vanish
+  c.session.last_will.msg              = "offline";
+  c.session.last_will.qos              = 1;
+  c.session.last_will.retain           = 1;
+  c.network.reconnect_timeout_ms       = 5000;
+  c.network.timeout_ms                 = 5000;
+  c.buffer.size                        = 512;
+  c.buffer.out_size                    = 512;
+  txQueue = xQueueCreate(24, sizeof(LinkPacket));
+  mq = esp_mqtt_client_init(&c);
+  if (!mq || !txQueue) { logEvent("COMM", "Server link start FAILED", "-", "ERROR"); mq = nullptr; return; }
+  xTaskCreate(serverTxTask, "serverTx", 6144, nullptr, 2, nullptr);   // TLS encryption runs on this stack
+  esp_mqtt_client_register_event(mq, MQTT_EVENT_ANY, onMqttEvent, nullptr);
+  esp_mqtt_client_start(mq);
+}
+
+void serverSend(const LinkPacket& p) {        // never waits: if the queue is full the packet is dropped
+  if (mq && mqUp) xQueueSend(txQueue, &p, 0);  // (status repeats every second; the server re-asks for log lines)
+}
+
+String mqErrorText() {
+  if (mqErrType == MQTT_ERROR_TYPE_CONNECTION_REFUSED)
+    return mqConnRc == MQTT_CONNECTION_REFUSE_BAD_USERNAME || mqConnRc == MQTT_CONNECTION_REFUSE_NOT_AUTHORIZED
+           ? "broker refused the gateway's user name / password" : "broker refused the connection";
+  if (mqTlsErr == ESP_ERR_MBEDTLS_SSL_HANDSHAKE_FAILED) return "TLS check failed (certificate / CA / name?)";
+  if (mqTlsErr == ESP_ERR_ESP_TLS_FAILED_CONNECT_TO_HOST || mqTlsErr == ESP_ERR_ESP_TLS_CONNECTION_TIMEOUT)
+    return "server not reachable (address / broker running?)";
+  return "connection failed (code " + String(mqErrType) + "/" + String(mqTlsErr) + ")";
+}
+
+void netJoin() {
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD, netCh);   // scans from the last known channel first
+  netStage = NET_JOINING;
+  netSince = millis();
+}
+
+void netBegin() {
+  if (!WIFI_SSID[0]) { logEvent("COMM", "Wi-Fi not set in secrets.h: no server link", "-", "WARN"); return; }
+  if (!SERVER_CA_PEM[0]) logEvent("COMM", "Server CA not set in secrets.h: server link off", "-", "WARN");
+  netJoin();
+}
+
+void netLoop() {
+  uint32_t now = millis();
+  if (mqSawConnect) { mqSawConnect = false; logEvent("COMM", "Server link connected (TLS)"); mqSawError = false; }
+  if (mqSawDrop)    { mqSawDrop = false;    logEvent("COMM", "Server link dropped"); }
+  if (mqSawError && (!mqLastErrLog || now - mqLastErrLog > 60000)) {   // retries every 5 s: log once a minute
+    mqSawError = false; mqLastErrLog = now;
+    logEvent("COMM", "Server link: " + mqErrorText(), "-", "ERROR");
+  }
+  switch (netStage) {
+    case NET_JOINING:
+      if (WiFi.status() == WL_CONNECTED) {
+        netStage = NET_UP;
+        netRetryS = WIFI_RETRY_MIN_S;
+        uint8_t ch = WiFi.channel();
+        radioSettleUntil = millis() + 3000;
+        if (ch != netCh) {
+          logEvent("COMM", "Radio channel " + String(netCh) + " -> " + String(ch) + " (Wi-Fi network): modules follow");
+          netCh = ch;
+          prefs.putUChar("wifiCh", ch);
+          radioSettleUntil = millis() + RADIO_SETTLE_MS;
+        }
+        logEvent("COMM", String("Wi-Fi joined ") + WIFI_SSID + " ch " + String(ch) + " " +
+                         WiFi.localIP().toString() + " " + String(WiFi.RSSI()) + " dBm");
+        showMsg("Wi-Fi ch " + String(ch), WiFi.localIP().toString(), 4000);
+        serverStart();
+      } else if (now - netSince > WIFI_JOIN_MS) {
+        wl_status_t st = WiFi.status();
+        WiFi.disconnect();
+        esp_wifi_set_channel(netCh, WIFI_SECOND_CHAN_NONE);   // back to the modules' channel
+        radioSettleUntil = millis() + 5000;
+        String why = st == WL_NO_SSID_AVAIL ? " not found" : st == WL_CONNECT_FAILED ? " refused (password?)" : " did not answer";
+        logEvent("COMM", String("Wi-Fi ") + WIFI_SSID + why + ": retry in " + String(netRetryS) + " s", "-", "FAIL");
+        netStage = NET_WAIT;
+        netSince = now;
+      }
+      break;
+    case NET_UP:
+      if (WiFi.status() != WL_CONNECTED) { logEvent("COMM", "Wi-Fi lost: rejoining"); netJoin(); }
+      break;
+    case NET_WAIT:
+      if (now - netSince >= netRetryS * 1000UL) { netRetryS = min(netRetryS * 2, WIFI_RETRY_MAX_S); netJoin(); }
+      break;
+    default:
+      break;
+  }
 }
 #endif
 
@@ -753,6 +975,12 @@ void onRecv(const uint8_t* src, const uint8_t* data, int len) {
 #endif
   RxItem it;                                   // runs in the Wi-Fi task: copy + queue only
   memcpy(it.src, src, 6);
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+  it.rssi = info->rx_ctrl ? (int8_t)info->rx_ctrl->rssi : 0;
+#else
+  it.rssi = 0;
+#endif
+  it.via = VIA_RADIO;
   it.len = len;
   memcpy(it.data, data, min(len, (int)sizeof(it.data)));
   xQueueSend(rxQueue, &it, 0);
@@ -762,7 +990,7 @@ bool addEncryptedPeer(PeerLink& L) {
   if (!L.macSet) return true;                  // no MAC yet: uses signed broadcast instead
   esp_now_peer_info_t pi = {};
   memcpy(pi.peer_addr, L.mac, 6);
-  pi.channel = ESPNOW_CHANNEL;
+  pi.channel = 0;                              // 0 = whatever channel the radio is on
   pi.ifidx   = WIFI_IF_STA;
   pi.encrypt = true;
   linkLmk(L.key, 32, pi.lmk);
@@ -784,16 +1012,22 @@ void radioBegin() {
   mqtt.setSocketTimeout(2);
   radioReady = true;
 #else
+  WiFi.persistent(false);
   WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(false);                // we choose when to scan: a scan takes the radio off the modules' channel
+  WiFi.setSleep(false);                        // ESP-NOW must keep hearing the modules while Wi-Fi is connected
   WiFi.disconnect();
-  esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
+  netCh = prefs.getUChar("wifiCh", ESPNOW_DEFAULT_CHANNEL);
+  if (netCh < 1 || netCh > 13) netCh = ESPNOW_DEFAULT_CHANNEL;
+  esp_wifi_set_channel(netCh, WIFI_SECOND_CHAN_NONE);
   if (esp_now_init() != ESP_OK) { radioReady = false; return; }
   esp_now_register_recv_cb(onRecv);
   esp_now_set_pmk(ESPNOW_PMK);
-  for (PeerLink* L : LINKS) addEncryptedPeer(*L);   // on failure that link uses signed broadcast
+  addEncryptedPeer(linkA);                     // on failure that link uses signed broadcast
+  addEncryptedPeer(linkB);
   esp_now_peer_info_t bc = {};
   memcpy(bc.peer_addr, BROADCAST, 6);
-  bc.channel = ESPNOW_CHANNEL;
+  bc.channel = 0;
   bc.ifidx   = WIFI_IF_STA;
   bc.encrypt = false;
   esp_now_add_peer(&bc);
@@ -817,7 +1051,8 @@ void linkSend(PeerLink& L, uint8_t type, uint8_t code, uint8_t role, uint8_t res
 #if WOKWI_SIM
   if (mqtt.connected()) mqtt.publish(topicFor(L.node).c_str(), (const uint8_t*)&p, sizeof(p));
 #else
-  esp_now_send(L.encrypted ? L.mac : BROADCAST, (const uint8_t*)&p, sizeof(p));
+  if (&L == &linkPc) serverSend(p);
+  else esp_now_send(L.encrypted ? L.mac : BROADCAST, (const uint8_t*)&p, sizeof(p));
 #endif
 }
 
@@ -843,7 +1078,7 @@ void reject(uint8_t kind, const String& why) {
 }
 
 // =====================================================================
-//  SYSTEM EVENT LOG  -> LittleFS + USB serial + PC
+//  SYSTEM EVENT LOG  -> LittleFS + USB serial + server
 //  Every line (gateway's own and the modules') gets a gateway number gw_no.
 //  Stored as  gw_no,<line>  where <line> is in the module log format.
 // =====================================================================
@@ -851,13 +1086,13 @@ bool fsOk = false;
 uint32_t logRotations = 0;
 const char* LOG_HEADER = "gw_no,log_no,boot,uptime_ms,unix_time,module,priority,state,type,event,zone,user,result";
 
-const uint8_t QSIZE = 32;                      // lines waiting to go to the PC
+const uint8_t QSIZE = 32;                      // lines waiting to go to the server
 char     pcQ[QSIZE][LINK_TEXT_MAX];
 uint32_t pcQNo[QSIZE];
 uint8_t  qHead = 0, qCount = 0;
 
 void queuePc(uint32_t no, const String& line) {
-  if (qCount == QSIZE) { qHead = (qHead + 1) % QSIZE; qCount--; }   // oldest dropped: the PC asks again
+  if (qCount == QSIZE) { qHead = (qHead + 1) % QSIZE; qCount--; }   // oldest dropped: the server asks again
   uint8_t slot = (qHead + qCount) % QSIZE;
   strncpy(pcQ[slot], line.c_str(), LINK_TEXT_MAX - 1);
   pcQ[slot][LINK_TEXT_MAX - 1] = 0;
@@ -901,9 +1136,9 @@ void logEvent(const char* type, const String& event, const char* zone,
   storeLine(no, line);
 }
 
-// ---------------- giving the PC lines it missed ----------------
+// ---------------- giving the server lines it missed ----------------
 bool     pcResendActive = false;
-uint32_t pcResendFrom = 0;
+uint32_t pcResendFrom = 0, pcResendTo = 0, nextPcResendTo = 0;   // To 0 = no upper limit
 uint8_t  pcResendFile = 0;
 size_t   pcResendPos = 0;
 uint16_t pcResendSent = 0;
@@ -911,12 +1146,13 @@ uint32_t pcResendRot = 0;
 
 void startPcResend(uint32_t from) {
   pcResendActive = fsOk; pcResendFrom = from; pcResendFile = 0; pcResendPos = 0; pcResendSent = 0;
+  pcResendTo = nextPcResendTo; nextPcResendTo = 0;
   pcResendRot = logRotations;
 }
 
 void pcResendStep() {                          // sends at most one line per call
   if (pcResendRot != logRotations) {           // the log rotated: start the scan again
-    pcResendRot = logRotations; pcResendFile = 0; pcResendPos = 0;   // (the PC drops lines it already has)
+    pcResendRot = logRotations; pcResendFile = 0; pcResendPos = 0;   // (the server drops lines it already has)
   }
   const char* files[] = { "/log_old.csv", "/log.csv" };
   while (pcResendFile < 2) {
@@ -931,6 +1167,7 @@ void pcResendStep() {                          // sends at most one line per cal
       int comma = line.indexOf(',');
       if (no == 0 || no < pcResendFrom || comma < 0) continue;
       f.close();
+      if (pcResendTo && no > pcResendTo) { pcResendActive = false; return; }   // the asked-for range is done
       String rest = line.substring(comma + 1);
       linkSend(linkPc, L_LOG, 1, 0, 0, 0, no, rest.c_str(), 0, 0);
       if (++pcResendSent >= RESEND_MAX_LINES) pcResendActive = false;
@@ -1029,7 +1266,7 @@ void onModuleStatus(ModuleView& m, const LinkPacket& p) {
 }
 
 // =====================================================================
-//  COMMANDS: from the keypad (card + PIN) or the PC (logged-in session)
+//  COMMANDS: from the keypad (card + PIN) or the dashboard (logged-in session)
 //  Sent to each target module, which answers OK / REFUSED / DENIED.
 // =====================================================================
 struct PendingCmd {
@@ -1053,8 +1290,8 @@ uint32_t sendModuleCmd(ModuleView& m, uint8_t cmd, uint8_t role, uint32_t arg, c
   return mySeq;
 }
 
-// A PC command that arrives while a keypad command is still running waits
-// for it (at most a few seconds), then runs: the PC goes next, ahead of the keypad.
+// A dashboard command that arrives while a keypad command is still running waits
+// for it (at most a few seconds), then runs: the dashboard goes next, ahead of the keypad.
 struct {
   bool     active = false;
   uint8_t  cmd = 0, target = 0, role = 0;
@@ -1076,13 +1313,13 @@ const char* cmdShort(uint8_t c) {               // short names for the 16-charac
   }
 }
 
-// Final answer: to the log, the LCD, and the PC if it asked.
+// Final answer: to the log, the LCD, and the dashboard if it asked.
 void report(bool fromPc, uint32_t pcSeq, uint8_t cmd, uint8_t res, const String& text, const String& who) {
   String msg = cmdName(cmd);
   if (text.length()) { msg += ": "; msg += text; }
   logEvent("CMD", msg, "-", resultName(res), -1, who);
   if (fromPc) linkSend(linkPc, L_CMD_RESULT, cmd, 0, res, pcSeq, 0, text.c_str(), 0, 0);
-  String l1 = fromPc ? String("PC ") : String("");
+  String l1 = fromPc ? String("Web ") : String("");
   l1 += cmdShort(cmd);
   l1 += res == RES_OK ? " OK" : " FAILED";
   showMsg(l1, text, RESULT_SHOW_MS);
@@ -1108,7 +1345,7 @@ void finishPending(const String& extra) {
   text.trim();
   pend.active = false;
   report(pend.fromPc, pend.pcSeq, pend.cmd, overall, text, pend.who);
-  if (pcWait.active) {                                      // the PC command that was waiting
+  if (pcWait.active) {                                      // the dashboard command that was waiting
     pcWait.active = false;
     if (pcSessionStill(pcWait.sessionId))
       runCommand(pcWait.cmd, pcWait.target, pcWait.role, pcWait.who, pcWait.arg, true, pcWait.seq);
@@ -1205,7 +1442,7 @@ void runCommand(uint8_t cmd, uint8_t target, uint8_t role, const String& who, ui
   uint8_t targets = target == TARGET_BOTH ? 3 : target == NODE_MOD_A ? 1 : target == NODE_MOD_B ? 2 : 0;
   if (!targets) { report(fromPc, pcSeq, cmd, RES_BAD, "Unknown target", who); return; }
   if (pend.active) {
-    if (fromPc && !pend.fromPc && !pcWait.active) {          // PC goes next, right after the keypad command
+    if (fromPc && !pend.fromPc && !pcWait.active) {          // dashboard goes next, right after the keypad command
       pcWait.active = true; pcWait.cmd = cmd; pcWait.target = target; pcWait.role = role;
       pcWait.arg = arg; pcWait.seq = pcSeq; pcWait.who = who;
       pcWait.sessionId = pcSessionId();
@@ -1223,7 +1460,7 @@ void runCommand(uint8_t cmd, uint8_t target, uint8_t role, const String& who, ui
 }
 
 // =====================================================================
-//  PC LOGIN + SESSION
+//  DASHBOARD LOGIN + SESSION
 // =====================================================================
 struct {
   bool     pending = false;
@@ -1254,9 +1491,9 @@ const PcUser* findPcUser(const String& u) {
 
 void endSession(const String& why, bool notifyPc) {
   if (!sess.active) return;
-  logEvent("AUTH", "PC session ended (" + why + ")", "-", "-", -1, sess.user + "@PC");
+  logEvent("AUTH", "Dashboard session ended (" + why + ")", "-", "-", -1, sess.user + "@web");
   sess.active = false;
-  sess.id = 0;                                     // a PC command still waiting won't run now
+  sess.id = 0;                                     // a dashboard command still waiting won't run now
   if (notifyPc && linkPc.trk.online) sendLoginResult(RES_DENIED, R_NONE, 0, "Session ended: " + why);
 }
 
@@ -1298,20 +1535,20 @@ void onLoginResp(const LinkPacket& p) {
     }
   }
   chal.pending = false;                                    // every challenge is single-use
-  String who = (u.length() ? u : String("?")) + "@PC";
+  String who = (u.length() ? u : String("?")) + "@web";
 
   if (ok) {
     pcLock.success();
     if (sess.active) endSession("new login", false);     // the new login's answer follows
     sess.active = true; sess.id = esp_random() | 1; sess.user = u; sess.role = pu->role;
     sess.lastUse = sess.started = millis();
-    logEvent("AUTH", String("PC login (") + roleName(pu->role) + ")", "-", "SUCCESS", -1, who);
+    logEvent("AUTH", String("Dashboard login (") + roleName(pu->role) + ")", "-", "SUCCESS", -1, who);
     sendLoginResult(RES_OK, pu->role, sess.id, "Welcome " + u);
-    showMsg("PC login", u);
+    showMsg("Web login", u);
     return;
   }
   uint32_t lockS = pcLock.fail();
-  logEvent("AUTH", "PC login failed", "-", "FAIL", -1, who);
+  logEvent("AUTH", "Dashboard login failed", "-", "FAIL", -1, who);
   if (lockS) sendLoginResult(RES_DENIED, R_NONE, 0, "Locked " + String(lockS) + " s");
   else       sendLoginResult(RES_DENIED, R_NONE, 0, "Wrong user or password, " + String(pcLock.triesLeft()) + " tries left");
 }
@@ -1328,21 +1565,22 @@ void onPcCommand(const LinkPacket& p) {
     linkSend(linkPc, L_CMD_RESULT, cmd, 0, mine ? RES_OK : RES_REFUSED, seq, 0, mine ? "Logged out" : "No session", 0, 0);
     return;
   }
+  if (cmd == CMD_RESEND_LOG) nextPcResendTo = sid;                     // session field = last line wanted
   bool needsLogin = !(cmd == CMD_SET_TIME || cmd == CMD_RESEND_LOG);   // read-only / housekeeping
-  if (!needsLogin) { runCommand(cmd, target, R_NONE, "PC", arg, true, seq); return; }
+  if (!needsLogin) { runCommand(cmd, target, R_NONE, "server", arg, true, seq); return; }
   if (!sess.active || sid != sess.id) {
-    logEvent("CMD", String(cmdName(cmd)) + " from PC refused: not logged in", "-", "DENIED", -1, "?@PC");
+    logEvent("CMD", String(cmdName(cmd)) + " from dashboard refused: not logged in", "-", "DENIED", -1, "?@web");
     linkSend(linkPc, L_CMD_RESULT, cmd, 0, RES_DENIED, seq, 0, "Not logged in", 0, 0);
     return;
   }
   sess.lastUse = millis();
-  if (kpBusy()) { logEvent("AUTH", "Keypad entry cancelled: PC command has priority"); kpLogout(); }
-  runCommand(cmd, target, sess.role, sess.user + "@PC", arg, true, seq);
+  if (kpBusy()) { logEvent("AUTH", "Keypad entry cancelled: dashboard command has priority"); kpLogout(); }
+  runCommand(cmd, target, sess.role, sess.user + "@web", arg, true, seq);
 }
 
 void checkSession() {
   if (!sess.active) return;
-  if (!linkPc.trk.online)                          endSession("PC link lost", false);
+  if (!linkPc.trk.online)                          endSession("server link lost", false);
   else if (millis() - sess.lastUse > SESSION_IDLE_MS) endSession("idle 5 min", true);
   else if (millis() - sess.started > SESSION_MAX_MS)  endSession("30 min limit", true);
 }
@@ -1372,11 +1610,13 @@ void handlePacket(const RxItem& it) {
   if (!L) { reject(RJ_UNKNOWN, "Unknown sender"); return; }
   if (!linkUsable(*L)) { reject(RJ_OTHER, String(L->name) + ": link not encrypted - set MACs"); return; }
 #if !WOKWI_SIM
+  if ((L == &linkPc) != (it.via == VIA_MQTT)) { reject(RJ_OTHER, String(L->name) + ": arrived on the wrong link"); return; }
   if (L->macSet && memcmp(it.src, L->mac, 6) != 0) { reject(RJ_MAC, String(L->name) + ": MAC not allowed"); return; }
 #endif
   uint8_t exp[SIG_LEN];
   linkSign(L->key, 32, p, exp);
   if (!sameBytes(exp, p.sig, SIG_LEN)) { reject(RJ_SIG, String(L->name) + ": bad signature (spoofed?)"); return; }
+  if (it.via == VIA_RADIO && it.rssi) L->rssi = it.rssi;
   if (p.dstBoot != myBoot) L->trk.sendHello = true;          // it doesn't know our current boot yet
   if (linkNeedsFreshness(p.type) && p.dstBoot != myBoot) {
     reject(RJ_STALE, String(L->name) + ": stale (made before our restart)"); return;
@@ -1384,7 +1624,7 @@ void handlePacket(const RxItem& it) {
   ModuleView* m = modFor(p.src);
   TrackResult tr = L->trk.accept(p);
   if (tr == TR_UNSYNCED) {                                   // waiting for its HELLO: tell it who we are
-    if (m) { L->trk.sendHello = false; linkSend(*L, L_HELLO, 0, 0, 0, unixNow(), 0, nullptr, 0, 0); }
+    if (m) { L->trk.sendHello = false; linkSend(*L, L_HELLO, radioChannel(), 0, 0, unixNow(), 0, nullptr, 0, 0); }
     return;
   }
   if (tr == TR_OLD_BOOT) { reject(RJ_REPLAY, String(L->name) + ": older boot number refused (flash erased? restart the gateway)"); return; }
@@ -1392,7 +1632,7 @@ void handlePacket(const RxItem& it) {
     uint32_t b = p.bootId;
     if (m && b != L->trk.bootId && millis() - L->lastKick > 1000) {   // a module restarted and its HELLO
       L->lastKick = millis();                                         // was lost: nudge it to send another
-      linkSend(*L, L_HELLO, 0, 0, 0, unixNow(), 0, nullptr, 0, 0);
+      linkSend(*L, L_HELLO, radioChannel(), 0, 0, unixNow(), 0, nullptr, 0, 0);
     }
     reject(RJ_REPLAY, String(L->name) + ": replayed/old packet");
     return;
@@ -1400,7 +1640,7 @@ void handlePacket(const RxItem& it) {
   if (tr == TR_NEW_BOOT) {
     logEvent("COMM", String(L->name) + " restarted (" + resetReasonName(p.resetReason) + ")");
     if (m) m->seenStatus = false;                           // re-check its log numbering
-    else   endSession("PC dongle restarted", true);
+    else   endSession("server restarted", true);
   }
   if (!L->trk.online) {
     L->trk.online = true;
@@ -1415,33 +1655,46 @@ void handlePacket(const RxItem& it) {
         {
           bool hello = ++L->beats % 10 == 1 || L->trk.sendHello;
           L->trk.sendHello = false;
-          linkSend(*L, hello ? L_HELLO : L_ACK, 0, 0, 0, unixNow(), 0, nullptr, 0, 0);   // "link alive"
+          linkSend(*L, hello ? L_HELLO : L_ACK, radioChannel(), 0, 0, unixNow(), 0, nullptr, 0, 0);   // "link alive" + our channel
         }
         break;
       case L_LOG:        onModuleLog(*m, p); break;
       case L_CMD_RESULT: onModuleCmdResult(*m, p); break;
       default:           reject(RJ_OTHER, String(L->name) + ": unexpected packet type " + String(p.type)); break;
     }
-  } else {                                         // the PC dongle
+  } else {                                         // the server
     switch (p.type) {
       case L_HELLO: case L_STATUS: break;          // heartbeat
       case L_LOGIN_REQ:  onLoginReq(p); break;
       case L_LOGIN_RESP: onLoginResp(p); break;
       case L_PC_CMD:     onPcCommand(p); break;
-      default:           reject(RJ_OTHER, String("PC: unexpected packet type ") + String(p.type)); break;
+      default:           reject(RJ_OTHER, String("Server: unexpected packet type ") + String(p.type)); break;
     }
   }
 }
 
+uint8_t radioChannel() {                         // told to the modules in every HELLO / ACK
+#if WOKWI_SIM
+  return 0;
+#else
+  return netCh;
+#endif
+}
+
 void checkLinkTimeout(PeerLink& L) {
-  if (L.trk.online && (int32_t)(millis() - L.trk.lastHeard) > (int32_t)LINK_TIMEOUT_MS) {
+#if WOKWI_SIM
+  uint32_t limit = LINK_TIMEOUT_MS;
+#else
+  uint32_t limit = &L == &linkPc ? SERVER_TIMEOUT_MS : moduleLinkTimeout();
+#endif
+  if (L.trk.online && (int32_t)(millis() - L.trk.lastHeard) > (int32_t)limit) {
     L.trk.online = false;
     onLinkDown(L);                                                                         // T09
   }
 }
 
 // =====================================================================
-//  STATUS TO THE PC + HOUSEKEEPING WITH THE MODULES
+//  STATUS TO THE SERVER + HOUSEKEEPING WITH THE MODULES
 // =====================================================================
 uint32_t lastStatus = 0;
 
@@ -1454,6 +1707,9 @@ String gwStatusText() {
   s += String(",TIME:") + (timeSynced ? "Y" : "N");
   s += String(",KPLOCK:") + String(kpLock.remaining) + ",PCLOCK:" + String(pcLock.remaining);
   s += String(",LOGNO:") + String(gwNo);
+  s += String(",WIFI:") + (WiFi.status() == WL_CONNECTED ? String(WiFi.RSSI()) : String("-"));
+  s += String(",CH:") + String(WiFi.channel());
+  s += String(",FW:") + FIRMWARE_VERSION;
   return s;
 }
 
@@ -1516,16 +1772,17 @@ void linkLoop() {
   for (PeerLink* L : LINKS) checkLinkTimeout(*L);
   pendingStep();
 
-  if (now - lastStatus >= STATUS_EVERY_MS) {        // 1 s: three status lines to the PC
+  if (now - lastStatus >= STATUS_EVERY_MS) {        // 1 s: three status lines to the server
     lastStatus = now;
     sendPcStatus(NODE_GATEWAY, gwStatusText());
     for (ModuleView* m : MODS) {
       String st = m->status;
       if (!modOnline(*m)) { st = String(m->letter); st += ",OFFLINE"; }
+      else if (m->L->rssi) { st += ",RSSI:"; st += String(m->L->rssi); }    // how well the gateway hears it
       sendPcStatus(m->L->node, st);
     }
     for (ModuleView* m : MODS) moduleHousekeeping(*m);
-  } else if (linkPc.trk.online) {                   // log lines only while the PC is listening
+  } else if (linkPc.trk.online) {                   // log lines only while the server is listening
     if (qCount > 0) {
       linkSend(linkPc, L_LOG, 0, 0, 0, 0, pcQNo[qHead], pcQ[qHead], 0, 0);
       qHead = (qHead + 1) % QSIZE; qCount--;
@@ -1838,14 +2095,14 @@ void setup() {
   if (!fsOk)           logEvent("SYSTEM", "Log storage unavailable", "-", "ERROR");
   if (!radioReady)     logEvent("COMM", "Radio start FAILED", "-", "ERROR");
   if (!display.online) logEvent("COMM", "LCD not found at boot");
-  if (!rfid.online)    logEvent("COMM", "RFID reader not found - use the PC", "-", "ERROR");
+  if (!rfid.online)    logEvent("COMM", "RFID reader not found - use the dashboard", "-", "ERROR");
 #if !WOKWI_SIM
   uint8_t own[6];
   WiFi.macAddress(own);
   if (macIsSet(MAC_GATEWAY) && memcmp(own, MAC_GATEWAY, 6) != 0)
     logEvent("SYSTEM", "MAC differs from MAC_GATEWAY in secrets.h", "-", "WARN");
   for (PeerLink* L : LINKS) {
-    if (linkUsable(*L) && L->encrypted) continue;
+    if (L == &linkPc || (linkUsable(*L) && L->encrypted)) continue;
     String why = L->macSet ? " encryption setup FAILED" : " MAC not set in secrets.h";
     if (ALLOW_UNENCRYPTED) logEvent("COMM", String(L->name) + why + ": signed, NOT encrypted", "-", "WARN");
     else                   logEvent("COMM", String(L->name) + why + ": link OFF", "-", "ERROR");
@@ -1865,6 +2122,9 @@ void setup() {
     gwState = GS_TAMPER;
     logEvent("TAMPER", "Gateway tamper restored after restart", "-", "-", 3);              // T10
   }
+#if !WOKWI_SIM
+  if (radioReady) netBegin();
+#endif
   bootAt = millis();
 }
 
@@ -1884,11 +2144,14 @@ void loop() {
 
   if (now - lastPeriphCheck > PERIPH_CHECK_MS) {
     lastPeriphCheck = now;
-    if (rfid.check())    logEvent("COMM", rfid.online ? "RFID reader online" : "RFID reader OFFLINE - use the PC", "-", "-", rfid.online ? -1 : 3);
+    if (rfid.check())    logEvent("COMM", rfid.online ? "RFID reader online" : "RFID reader OFFLINE - use the dashboard", "-", "-", rfid.online ? -1 : 3);
     if (display.check()) logEvent("COMM", display.online ? "LCD online" : "LCD OFFLINE");
   }
   kpLock.tick();
   pcLock.tick();
+#if !WOKWI_SIM
+  netLoop();
+#endif
   linkLoop();
   checkSession();
   handleUi(key);

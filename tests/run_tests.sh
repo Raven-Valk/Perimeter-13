@@ -14,3 +14,6 @@ open('win.h','w').write('#pragma once\n#include <cstdint>\n#include <cstring>\nc
 PY
 g++ -std=c++17 -o log_recovery_tests log_recovery_tests.cpp
 ./log_recovery_tests
+# The server's Python packet code against this C++ header
+g++ -std=c++17 -I. -o interop_helper interop_helper.cpp -lcrypto
+python3 interop_tests.py

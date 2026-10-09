@@ -8,7 +8,9 @@
 
 The sketch already has `WOKWI_SIM 1`, which also selects Wokwi's preset cards. **Don't upload it to a real board.**
 
-**Update your two module projects too.** The shared protocol changed when the gateway was added, so paste the **new** `SensorModule/sketch.ino` into both "P13 Module A" and "P13 Module B". Then set `MODULE_ID 'B'` again in B.
+**Update your two module projects too** whenever you update the gateway: paste the **new** `SensorModule/sketch.ino` into both "P13 Module A" and "P13 Module B", then set `MODULE_ID 'B'` again in B.
+
+These sketches are generated from the real firmware by `Tools/make_wokwi.py`. Change the firmware, then run that script, rather than editing these files.
 
 ## Set up
 
@@ -57,4 +59,17 @@ The modules' typed bench commands (`arm`, `ack`…) still work in Wokwi, alongsi
 - **Radio:** MQTT through a public server instead of ESP-NOW (same signed packets). No encryption and no MAC allow-list.
 - **Nothing survives stopping Wokwi** (lockouts, tamper state, log, restart counters). Because there are no restart counters, the simulator accepts any new boot. Anyone on that public server could replay an old "I restarted" packet. Test the restart protection on the real boards.
 - **Timeouts are longer:** 8 s for links and up to 9 s for a command answer, because MQTT over the internet is slower.
-- **The PC dashboard isn't built yet.** The LCD shows `PC:N`.
+- **No Wi-Fi channel finding:** in Wokwi everything goes through MQTT, so the module's channel search is switched off.
+
+## The dashboard with Wokwi
+
+The real dashboard can follow the simulation. On any computer with Python 3.11+ (internet needed, for the public broker):
+
+```
+cd Server
+pip install -r requirements.txt
+python3 scripts/setup.py --key-hex f23eaba527c7e035a8178ec427f504d091601abacc939e6a717d14e88dabb71e
+python3 -m p13server --mode wokwi
+```
+
+The `--key-hex` value is the Wokwi gateway's `KEY_GW_SERVER` (the demo key). Open https://127.0.0.1:8443 (accept the certificate warning) and sign in as `operator` / `operator123` or `admin` / `admin123`. The LCD's `PC:` changes to `Y`, then to `L` when someone has control. The page shows a banner: the public broker means anyone can read the packets, although they still can't forge them.

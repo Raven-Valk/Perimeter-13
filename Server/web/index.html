@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Perimeter 13</title>
+<link rel="icon" href="/assets/img/mark.svg" type="image/svg+xml">
+<link rel="preload" href="/assets/fonts/barlow-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/assets/fonts/barlow-condensed-latin-600-normal.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/assets/css/app.css">
+<script type="module" src="/assets/js/main.js"></script>
+</head>
+<body>
+
+<header class="bar">
+  <a class="brand" href="/" aria-label="Perimeter 13, home">
+    <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
+      <path d="M5 26V8M27 26V8" />
+      <path d="M8 11 L24 9.5 L24 14.5 Z" class="beam" />
+      <path d="M24 11 L8 9.5 L8 14.5 Z" class="beam" />
+      <path d="M3 26h26" />
+    </svg>
+    <span class="brand-name">Perimeter 13</span>
+  </a>
+  <span class="site" id="site"></span>
+  <div class="bar-right">
+    <span class="feed" id="feed" data-state="connecting">Connecting</span>
+    <time class="clock" id="clock"></time>
+    <div class="who" id="who" hidden>
+      <span class="who-name" id="who-name"></span>
+      <button class="link-button" id="sign-out" type="button">Sign out</button>
+    </div>
+  </div>
+</header>
+
+<p class="notice" id="notice" hidden></p>
+
+<main class="console" id="console" hidden>
+  <section class="situation" aria-labelledby="statement">
+    <h1 class="statement" id="statement" data-level="quiet">Connecting to the server</h1>
+    <p class="statement-detail" id="statement-detail"></p>
+  </section>
+
+  <section class="sheet" aria-label="Plan view of the protected wall">
+    <div class="sheet-scroll">
+    <svg class="plan" id="plan" viewBox="0 0 1000 560" role="img" aria-labelledby="plan-title">
+      <title id="plan-title">Plan view: the protected wall with Module A and Module B at its ends, their sensor coverage, and the gateway</title>
+      <defs>
+        <pattern id="poche" width="7" height="7" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+          <line x1="0" y1="0" x2="0" y2="7" class="poche-line" />
+        </pattern>
+        <pattern id="hatch-warn" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(-45)">
+          <line x1="0" y1="0" x2="0" y2="6" class="hatch-warn-line" />
+        </pattern>
+        <pattern id="hatch-alarm" width="5" height="5" patternUnits="userSpaceOnUse">
+          <path d="M0 0L5 5M5 0L0 5" class="hatch-alarm-line" />
+        </pattern>
+        <marker id="tick" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="9" markerHeight="9" orient="auto">
+          <path d="M2 8 L8 2" class="tick-line" />
+        </marker>
+      </defs>
+
+      <rect class="frame" x="8" y="8" width="984" height="544" />
+
+      <text class="orient" x="102" y="44">Outside</text>
+      <text class="orient middle" x="500" y="292">Inside</text>
+
+      <g class="dimension">
+        <line x1="120" y1="78" x2="880" y2="78" marker-start="url(#tick)" marker-end="url(#tick)" />
+        <line x1="120" y1="70" x2="120" y2="104" class="ext" />
+        <line x1="880" y1="70" x2="880" y2="104" class="ext" />
+        <rect x="440" y="68" width="120" height="20" class="dim-gap" />
+        <text x="500" y="83">protected wall</text>
+      </g>
+
+      <g class="fans">
+        <path id="fan-A-WALL" class="fan" d="M182 146 L846 130 L846 200 Z" />
+        <path id="fan-B-WALL" class="fan" d="M818 146 L154 130 L154 200 Z" />
+        <path id="fan-A-SIDE" class="fan" d="M158 168 L140 432 L238 432 Z" />
+        <path id="fan-B-SIDE" class="fan" d="M842 168 L860 432 L762 432 Z" />
+      </g>
+
+      <g class="walls">
+        <rect x="102" y="110" width="796" height="20" />
+        <rect x="102" y="110" width="20" height="340" />
+        <rect x="878" y="110" width="20" height="340" />
+      </g>
+
+      <g class="links">
+        <path id="link-AB" class="radio" d="M182 166 Q500 250 818 166" />
+        <path id="link-AG" class="radio" d="M168 168 Q300 330 466 342" />
+        <path id="link-BG" class="radio" d="M832 168 Q700 330 534 342" />
+        <path id="link-GS" class="radio wifi" d="M534 352 Q600 420 676 428" />
+      </g>
+
+      <g class="callouts">
+        <g class="tag" id="tag-A-WALL" transform="translate(330 172)"><rect x="-30" y="-12" width="60" height="22" /><text y="4">A-WALL</text></g>
+        <g class="tag" id="tag-B-WALL" transform="translate(670 172)"><rect x="-30" y="-12" width="60" height="22" /><text y="4">B-WALL</text></g>
+        <g class="tag" id="tag-A-SIDE" transform="translate(196 400)"><rect x="-30" y="-12" width="60" height="22" /><text y="4">A-SIDE</text></g>
+        <g class="tag" id="tag-B-SIDE" transform="translate(804 400)"><rect x="-30" y="-12" width="60" height="22" /><text y="4">B-SIDE</text></g>
+      </g>
+
+      <g class="unit" id="unit-A" data-state="unknown">
+        <rect class="box" x="134" y="134" width="48" height="34" />
+        <text class="letter" x="158" y="157">A</text>
+        <text class="unit-state middle" x="158" y="190" id="unit-A-state">—</text>
+      </g>
+      <g class="unit" id="unit-B" data-state="unknown">
+        <rect class="box" x="818" y="134" width="48" height="34" />
+        <text class="letter" x="842" y="157">B</text>
+        <text class="unit-state middle" x="842" y="190" id="unit-B-state">—</text>
+      </g>
+      <g class="unit gateway" id="unit-G" data-state="unknown">
+        <rect class="box" x="466" y="330" width="68" height="34" />
+        <text class="letter" x="500" y="353">GW</text>
+        <text class="unit-state middle" x="500" y="384" id="unit-G-state">—</text>
+      </g>
+      <g class="server" id="unit-S">
+        <rect class="box" x="676" y="414" width="40" height="26" />
+        <path class="base" d="M668 444 h56" />
+        <text class="unit-state" x="732" y="432">Server</text>
+        <text class="wifi-label" x="668" y="462" id="wifi-label"></text>
+      </g>
+
+      <g class="title-block" transform="translate(30 470)">
+        <rect width="450" height="70" />
+        <line x1="0" y1="35" x2="450" y2="35" />
+        <line x1="150" y1="0" x2="150" y2="70" />
+        <line x1="300" y1="0" x2="300" y2="70" />
+        <text class="tb-label" x="10" y="15">Site</text>
+        <text class="tb-value" x="10" y="29" id="tb-site">—</text>
+        <text class="tb-label" x="160" y="15">Gateway boot</text>
+        <text class="tb-value mono" x="160" y="29" id="tb-gw-boot">—</text>
+        <text class="tb-label" x="310" y="15">Server boot</text>
+        <text class="tb-value mono" x="310" y="29" id="tb-srv-boot">—</text>
+        <text class="tb-label" x="10" y="50">Firmware</text>
+        <text class="tb-value" x="10" y="64" id="tb-fw">—</text>
+        <text class="tb-label" x="160" y="50">Server link</text>
+        <text class="tb-value" x="160" y="64" id="tb-link">—</text>
+        <text class="tb-label" x="310" y="50">Radio channel</text>
+        <text class="tb-value" x="310" y="64" id="tb-ch">—</text>
+      </g>
+    </svg>
+    </div>
+  </section>
+
+  <aside class="side">
+    <section class="control" id="control" aria-labelledby="control-title">
+      <h2 id="control-title">Control</h2>
+      <p class="control-who" id="control-who"></p>
+
+      <div class="control-body" id="control-live">
+        <fieldset class="target" id="target">
+          <legend>Apply to</legend>
+          <label><input type="radio" name="target" value="both" checked><span>Both modules</span></label>
+          <label><input type="radio" name="target" value="A"><span>Module A</span></label>
+          <label><input type="radio" name="target" value="B"><span>Module B</span></label>
+        </fieldset>
+
+        <div class="actions">
+          <button class="action primary" data-command="arm" type="button">Arm</button>
+          <button class="action" data-command="disarm" data-confirm="Press again to disarm" type="button">Disarm</button>
+          <button class="action alarm" data-command="ack" type="button">Acknowledge alarm</button>
+          <button class="action" data-command="maint_end" type="button">End maintenance</button>
+        </div>
+
+        <div class="maint" id="maint">
+          <p class="hint role-note">Maintenance and clearing faults need the maintenance role.</p>
+          <h3>Maintenance</h3>
+          <p class="hint">Sensors log but don't alarm. Ends by itself.</p>
+          <div class="row">
+            <label class="select"><span class="sr">Duration</span>
+              <select id="maint-seconds">
+                <option value="300">5 minutes</option>
+                <option value="600">10 minutes</option>
+                <option value="900">15 minutes</option>
+              </select>
+            </label>
+            <button class="action compact" data-command="maint_start" type="button">Start</button>
+          </div>
+          <h3>Clear a fault</h3>
+          <p class="hint">After a tamper: check the enclosure, close the lid, then clear.</p>
+          <div class="row">
+            <label class="select"><span class="sr">Unit</span>
+              <select id="clear-target">
+                <option value="both">Both modules</option>
+                <option value="A">Module A</option>
+                <option value="B">Module B</option>
+                <option value="gateway">Gateway</option>
+              </select>
+            </label>
+            <button class="action compact" data-command="clear" data-confirm="Press again to clear" type="button">Clear</button>
+          </div>
+        </div>
+        <p class="result" id="result" role="status" aria-live="polite"></p>
+      </div>
+
+      <form class="take" id="take" hidden>
+        <p class="take-why" id="take-why"></p>
+        <label><span>Password for <span id="take-user"></span></span>
+          <input type="password" id="take-password" autocomplete="current-password" required>
+        </label>
+        <button class="action primary" type="submit">Take control</button>
+        <p class="result" id="take-result" role="status" aria-live="polite"></p>
+      </form>
+    </section>
+
+    <section class="units" aria-labelledby="units-title">
+      <h2 id="units-title">Units</h2>
+      <table class="spec" id="spec">
+        <thead><tr><th scope="col"><span class="sr">Reading</span></th><th scope="col">Gateway</th><th scope="col">A</th><th scope="col">B</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <section class="integrity" aria-labelledby="integrity-title">
+      <h2 id="integrity-title">Link integrity</h2>
+      <dl class="facts" id="facts"></dl>
+      <h3>Refused packets</h3>
+      <dl class="facts rejects" id="rejects"></dl>
+      <h3>Server audit</h3>
+      <ol class="audit" id="audit"></ol>
+    </section>
+  </aside>
+
+  <section class="log" aria-labelledby="log-title">
+    <div class="log-head">
+      <h2 id="log-title">Event log</h2>
+      <div class="filters" role="group" aria-label="Show">
+        <button type="button" data-filter="all" aria-pressed="true">All</button>
+        <button type="button" data-filter="alerts" aria-pressed="false">Alerts</button>
+        <button type="button" data-filter="access" aria-pressed="false">Sign-ins</button>
+        <button type="button" data-filter="commands" aria-pressed="false">Commands</button>
+        <button type="button" data-filter="system" aria-pressed="false">System</button>
+      </div>
+      <label class="select unit-filter"><span class="sr">Unit</span>
+        <select id="unit-filter">
+          <option value="">Every unit</option>
+          <option value="G">Gateway</option>
+          <option value="A">Module A</option>
+          <option value="B">Module B</option>
+        </select>
+      </label>
+      <label class="search"><span class="sr">Search the log</span>
+        <input type="search" id="search" placeholder="Search" autocomplete="off" spellcheck="false">
+      </label>
+      <a class="link-button" id="export" href="/api/events.csv">Export CSV</a>
+    </div>
+    <div class="log-scroll">
+      <table class="events" id="events">
+        <thead><tr>
+          <th scope="col" class="c-no">No.</th><th scope="col" class="c-time">Time</th><th scope="col" class="c-unit">Unit</th>
+          <th scope="col" class="c-p">P</th><th scope="col" class="c-type">Type</th><th scope="col">Event</th>
+          <th scope="col" class="c-zone">Zone</th><th scope="col" class="c-by">By</th><th scope="col" class="c-res">Result</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+      <p class="log-empty" id="log-empty" hidden>Nothing matches. Clear the search or pick another filter.</p>
+      <button class="link-button more" id="more" type="button" hidden>Show older events</button>
+    </div>
+  </section>
+
+</main>
+
+<div class="gate" id="gate" hidden>
+  <form class="sign-in" id="sign-in">
+    <h1>Perimeter 13</h1>
+    <p>Sign in with your dashboard account. The gateway checks the password; this server never stores it.</p>
+    <label><span>User name</span><input id="user" autocomplete="username" required maxlength="31" spellcheck="false"></label>
+    <label><span>Password</span><input id="password" type="password" autocomplete="current-password" required maxlength="128"></label>
+    <button class="action primary" type="submit">Sign in</button>
+    <p class="result" id="sign-in-result" role="status" aria-live="polite"></p>
+    <p class="gate-status" id="gate-status"></p>
+  </form>
+</div>
+
+</body>
+</html>

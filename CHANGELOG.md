@@ -8,6 +8,7 @@ The version numbers here are the final ones. During development some versions ha
 
 | Version | Date | What changed | Working name |
 |---|---|---|---|
+| [`v5`](#v5) | 2026-10-10 | gateway on Wi-Fi (MQTT over TLS) + server and dashboard website | v5.4 |
 | [`v4.3`](#v43) | 2026-10-09 | built-in pull-ups instead of resistors, new pin map, wiring diagrams | v5.3 |
 | [`v4.2`](#v42) | 2026-10-09 | gateway control box, PC login protocol, links off until MACs are set | v5.2 |
 | [`v4.1`](#v41) | 2026-10-08 | clear a tamper or fault on the module with a MAINTENANCE PIN | v5.1 |
@@ -16,6 +17,36 @@ The version numbers here are the final ones. During development some versions ha
 | [`v3`](#v3) | 2026-10-06 | one controller board with both PIRs + listen-only gateway to the PC | Pinnacle13_Firmware_v4 (first) |
 | [`v2`](#v2) | 2026-10-06 | teammate's single-board draft (draft2.ino) | draft2.ino |
 | [`v1`](#v1) | 2026-10-05 | two-node firmware (main controller + sensor node over ESP-NOW) | Pinnacle13_Firmware |
+
+## v5
+
+*2026-10-10* · gateway on Wi-Fi (MQTT over TLS) + server and dashboard website · worked on as v5.4
+
+The PC dongle is gone: the gateway joins Wi-Fi (laptop hotspot or router) and talks to a server on the laptop over MQTT inside TLS. New server with the dashboard website.
+
+**Gateway**
+
+- Wi-Fi + MQTT over TLS (port 8883) with the system's own certificate authority; retries that keep the modules' radio channel steady.
+- Status includes Wi-Fi signal, channel and firmware version; the LCD shows the channel and IP address.
+
+**Modules**
+
+- Find the gateway's radio channel by themselves when it goes quiet (about 2 s) and remember it.
+
+**Server (new)**
+
+- Python asyncio server: MQTT link to the gateway, HTTPS dashboard (port 8443), SQLite event store.
+- Dashboard sign-in is a challenge-response with the gateway; the server never stores the password.
+- Setup script for the broker (Mosquitto), certificates and the gateway's secrets; systemd service; gateway emulator for testing without hardware.
+- Server tests and C++/Python interop tests of the packet format.
+
+**Protocol**
+
+- Same packet format (v3); the PC dongle node is now the server (NODE_SERVER).
+
+**Tools**
+
+- make_wokwi.py builds the Wokwi sketches from the real firmware; WiFi_Link_Test checks Wi-Fi range.
 
 ## v4.3
 
