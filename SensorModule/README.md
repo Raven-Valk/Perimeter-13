@@ -1,4 +1,4 @@
-# Project 13: Sensor Module firmware (v4.1)
+# Project 13: Sensor Module firmware (v4.2)
 
 One sketch runs on **both** sensor modules. The only line that differs between them is near the top of `SensorModule.ino`:
 
@@ -73,19 +73,23 @@ The LEDs moved off the boot pins (2, 12, 15) that Board 1 used before. The PIRs 
 - Join the two − rails.
 - Power the ESP32 from a 5 V USB adapter.
 
-## Setting up the two modules
+## Setting up the boards (both modules and the gateway)
 
 1. Wire both modules the same way.
 2. Upload with `MODULE_ID 'A'` to one board and with `'B'` to the other. Label the boards.
-3. Open Serial Monitor (115200). Each board prints `Sensor Module A, MAC 24:6F:28:…`. Write both MACs down.
-4. When the gateway is built, put all three MACs into `secrets.h` on **every** board:
-   - `MAC_MOD_A`, `MAC_MOD_B` and `MAC_GATEWAY`, written as `0x24, 0x6F, …`.
-   - Then upload again.
-   - From then on the links are **encrypted**, and packets from any other MAC are refused.
-   - Until the MACs are set, the links still work and are still signed. The log says "MAC not set: signed, NOT encrypted".
-5. Change the demo keys before the real demo. The comment in `secrets.h` shows the one-line command. Module A, Module B and the gateway must hold the same bytes for each shared key.
+3. Open Serial Monitor (115200). Each board prints `Sensor Module A, MAC 24:6F:28:…`, and the gateway prints `Gateway, MAC …`. Write all three down (four once the PC dongle exists).
+4. Put the MACs into `secrets.h` on **every** board:
+   - `MAC_MOD_A`, `MAC_MOD_B` and `MAC_GATEWAY` (and `MAC_DONGLE` on the gateway), written as `0x24, 0x6F, …`.
+   - Upload all boards again.
+   - From then on every link is **encrypted**, and packets from any other MAC are refused.
+5. **Until the MACs are set, the radio links stay OFF.** The log says "MAC not set in secrets.h: link OFF". That's on purpose: the boards never send anything readable over the air.
+   - For a quick first test before step 4, you can set `#define ALLOW_UNENCRYPTED 1` (near the top of each sketch). The links then work signed but readable.
+   - Set it back to 0 for the demo.
+6. Change the demo keys before the real demo. The comment in `secrets.h` shows the one-line command. Module A, Module B and the gateway must hold the same bytes for each shared key.
 
-**After erasing a board's flash** ("Erase All Flash" or a factory reset), restart the other boards too. Each board counts its restarts in flash. The other boards refuse packets from a restart number they have already seen, which is what blocks replayed packets.
+**After a restart, links come back within about a second.** A board that has just restarted only listens for a fresh "I restarted" (HELLO) packet from the others, so old recorded packets can't be fed to it.
+
+**After erasing a board's flash** ("Erase All Flash" or a factory reset), restart the other boards too. Each board counts its restarts in flash, and the others refuse a restart number older than one they have already seen. That's what stops replayed packets. The log then says "older boot number refused (flash erased? restart this board)".
 
 ## Testing without the gateway: bench commands
 
@@ -125,7 +129,7 @@ These act as a MAINTENANCE user, with no card or PIN. **Set `BENCH_COMMANDS 0` a
 
 ## Event log
 
-Every event is written to the module's flash (`/log.csv`, the last ~128 KB is kept), to USB serial, and to the gateway. The gateway can ask for any lines it missed.
+Every event is written to the module's flash (`/log.csv`, the last ~128 KB is kept), to USB serial, and to the gateway. The gateway can ask for any lines it missed. After a restart the numbering carries on exactly from the last line in the file.
 
 ```
 log_no,boot,uptime_ms,unix_time,module,priority,state,type,event,zone,user,result

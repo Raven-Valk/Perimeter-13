@@ -8,12 +8,42 @@ The version numbers here are the final ones. During development some versions ha
 
 | Version | Date | What changed | Working name |
 |---|---|---|---|
+| [`v4.2`](#v42) | 2026-10-09 | gateway control box, PC login protocol, links off until MACs are set | v5.2 |
 | [`v4.1`](#v41) | 2026-10-08 | clear a tamper or fault on the module with a MAINTENANCE PIN | v5.1 |
 | [`v4`](#v4) | 2026-10-08 | sensor module firmware for two identical modules (A, B) | v5 (SensorModule) |
 | [`v3.1`](#v31) | 2026-10-07 | Wokwi simulation of the controller and gateway, bench tools | Pinnacle13_Firmware_v4 + Wokwi |
 | [`v3`](#v3) | 2026-10-06 | one controller board with both PIRs + listen-only gateway to the PC | Pinnacle13_Firmware_v4 (first) |
 | [`v2`](#v2) | 2026-10-06 | teammate's single-board draft (draft2.ino) | draft2.ino |
 | [`v1`](#v1) | 2026-10-05 | two-node firmware (main controller + sensor node over ESP-NOW) | Pinnacle13_Firmware |
+
+## v4.2
+
+*2026-10-09* · gateway control box, PC login protocol, links off until MACs are set · worked on as v5.2
+
+Adds the gateway: the control box with the RFID reader, keypad and LCD that sends commands to both modules and collects their logs. The protocol gains the PC login messages, and the radio links stay off until every board's MAC address is set.
+
+**Gateway (new)**
+
+- Card + PIN then a menu: arm, disarm, acknowledge, maintenance, clear tamper/fault, per module or both.
+- Each module's result comes back to the LCD; a repeated command is recognised and not run twice.
+- Log recovery: asks the modules again for any log lines it missed, also after a restart.
+- Tamper switch, 3 LEDs; 3 wrong card/PIN tries lock the keypad (60 s up to 960 s), surviving a restart.
+
+**PC login (prepared for the dashboard)**
+
+- Challenge-response: the gateway stores PBKDF2-HMAC-SHA256 password hashes (100,000 rounds); the password never travels.
+- Sessions: one at a time, 5 min idle / 30 min total; separate lockout for PC logins.
+
+**Radio security**
+
+- Links are OFF until the MAC addresses are set, so nothing readable is ever sent (ALLOW_UNENCRYPTED 1 only for a first bench test).
+- After a restart a board accepts only a fresh HELLO; boards answer an out-of-date boot number with a HELLO, so links come back in about a second.
+- Log numbering carries on from the last line in flash after a restart.
+
+**Tests and simulation**
+
+- 60 protocol checks (including the PC login against a Python reference) and 11 log-recovery checks; run_tests.sh.
+- Wokwi projects for the gateway and a sensor module.
 
 ## v4.1
 

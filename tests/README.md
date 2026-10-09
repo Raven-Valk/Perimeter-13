@@ -1,10 +1,8 @@
-# Protocol tests (run on a PC, not the ESP32)
+# Tests that run on a PC (not on the ESP32)
 
-Checks the shared radio protocol: signatures per link, tampering in transit, replay, stale commands after a restart, old-HELLO replay, and the encryption key derivation. The `Arduino.h`, `esp_task_wdt.h` and `mbedtls/` files here are small stand-ins so the header compiles on a PC.
+    ./run_tests.sh          (Linux / macOS / WSL; needs g++, python3, OpenSSL)
 
-Linux / macOS / WSL (needs OpenSSL):
+- `protocol_tests.cpp` (60 checks): signatures per link, tampering in transit (role, command, target, session), replay, stale commands after a restart, old-HELLO replay, waiting for HELLO after a restart, PC login challenge-response against a Python reference, encryption key derivation.
+- `log_recovery_tests.cpp` (11 checks): the gateway's "which module lines do I have" logic, taken straight from `Gateway.ino`: no line stored twice, the right lines asked for again, after a restart too.
 
-    cp ../SensorModule/link_protocol.h .
-    g++ -std=c++17 -I. -o test protocol_tests.cpp -lcrypto && ./test
-
-Expected last line: `ALL TESTS PASSED (0 failed)`.
+`Arduino.h`, `esp_task_wdt.h` and `mbedtls/` here are small stand-ins so the code compiles on a PC.

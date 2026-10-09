@@ -3,6 +3,8 @@
 //    Sensor Module A, Sensor Module B, Gateway, PC dongle.
 //  Keep this file IDENTICAL in every sketch folder.
 //
+//  Links:  Module A <-> Module B,  Module A/B <-> Gateway,  Gateway <-> PC dongle.
+//
 //  Every packet is:
 //    * signed with HMAC-SHA256 using the key of that one link
 //      (A<->B, A<->Gateway, B<->Gateway, Gateway<->PC each have their own key),
@@ -17,6 +19,10 @@
 #include <Arduino.h>
 #include <esp_task_wdt.h>
 #include "mbedtls/md.h"
+
+// Declared early so the Arduino IDE / Wokwi auto-prototypes compile when this
+// file is pasted into a single-file sketch.
+struct LinkPacket;
 
 #define LINK_VERSION    3
 #define ESPNOW_CHANNEL  1      // every board must use the same Wi-Fi channel
@@ -40,9 +46,25 @@ enum LinkType : uint8_t {
   L_PEER_EVENT = 5,  // module -> module: one of my zones fired (code = zone, arg = age in ms)
   L_PEER_ALARM = 6,  // module -> module: I confirmed an intrusion, sound too (arg = alarm no., text = why)
   L_CMD        = 7,  // gateway -> module: command (code = Cmd, role, arg, text = "user@source")
-  L_CMD_RESULT = 8,  // module -> gateway: result (code = Cmd, result, arg = the command's seq, text = reason)
-  L_TYPE_MAX   = 8
+  L_CMD_RESULT = 8,  // result of a command (code = Cmd, result, arg = the command packet's seq, text = details)
+                     //   module -> gateway, and gateway -> PC
+  // ---- PC dongle <-> gateway ----
+  L_LOGIN_REQ    = 9,   // PC -> gateway: text = user name. Gateway answers with a challenge.
+  L_LOGIN_CHAL   = 10,  // gateway -> PC: text = 32 hex chars (16-byte random challenge)
+  L_LOGIN_RESP   = 11,  // PC -> gateway: text = "user:" + hex(HMAC-SHA256(pwHash, challenge || user))
+  L_LOGIN_RESULT = 12,  // gateway -> PC: result OK/DENIED, role, session = new session ID (0 = none), text = message
+  L_PC_CMD       = 13,  // PC -> gateway: code = Cmd, target, arg, session = session ID
+  L_TYPE_MAX     = 13
 };
+//  PC password: the gateway stores
+//      pwHash = PBKDF2-HMAC-SHA256(password, salt = "p13-pc:" + user, 100000 rounds, 32 bytes)
+//  (hex). Only the PC ever computes it (slow on purpose, so guessing is slow).
+//  The password never travels; the PC proves it knows it by answering the random
+//  challenge. Status to the PC: L_STATUS with code = the node it describes.
+//
+//  L_CMD (gateway -> module): logNo = command ID (the same on every retry; the
+//  module answers a repeat with its first result instead of running it twice;
+//  0 = no ID). For CMD_RESEND_LOG: arg = first line, session = last line (0 = no limit).
 
 enum Cmd : uint8_t {
   CMD_ARM = 1, CMD_DISARM = 2,
@@ -52,12 +74,22 @@ enum Cmd : uint8_t {
   CMD_CLEAR_FAULT = 6,   // clear tamper / fault (MAINTENANCE only)
   CMD_SET_TIME = 7,      // arg = Unix time (seconds)
   CMD_RESEND_LOG = 8,    // arg = first log line number wanted
-  CMD_MAX = 8
+  CMD_LOGOUT = 9,        // PC -> gateway: end the session
+  CMD_MAX = 9
 };
+// Command target (L_PC_CMD): 0 = both modules, or NODE_MOD_A / NODE_MOD_B / NODE_GATEWAY
+const uint8_t TARGET_BOTH = 0;
 enum CmdResult : uint8_t { RES_OK = 0, RES_REFUSED = 1, RES_DENIED = 2, RES_BAD = 3 };
 enum Role : uint8_t { R_NONE = 0, R_OPERATOR = 1, R_MAINTENANCE = 2 };
 enum ZoneCode : uint8_t { ZONE_WALL = 1, ZONE_SIDE = 2 };
 enum Health : uint8_t { H_OK = 0, H_WARMUP = 1, H_STUCK = 2, H_OFFLINE = 3 };
+
+// Sensor module states, as sent in LinkPacket.state (the module's own enum must match).
+enum ModState : uint8_t { MS_BOOT, MS_DISARMED, MS_ARMED, MS_INTRUSION, MS_TAMPER_FAULT, MS_MAINTENANCE, MS_RECOVERY, MS_COUNT };
+inline const char* modStateShort(uint8_t s) {      // 3 letters, for the gateway LCD
+  static const char* N[] = { "BT ", "DIS", "ARM", "ALM", "TMP", "MNT", "REC" };
+  return s < MS_COUNT ? N[s] : "?? ";
+}
 
 #pragma pack(push, 1)
 struct LinkPacket {
@@ -76,6 +108,8 @@ struct LinkPacket {
   uint8_t  role;           // L_CMD: role of the user who gave the command
   uint8_t  result;         // L_CMD_RESULT: CmdResult
   uint32_t arg;            // number argument, depending on type
+  uint32_t session;        // L_PC_CMD / L_LOGIN_RESULT: session ID
+  uint8_t  target;         // L_PC_CMD: which board the command is for (TARGET_BOTH, NODE_...)
   uint8_t  textLen;        // bytes used in text[]
   char     text[LINK_TEXT_MAX];
   uint8_t  sig[SIG_LEN];   // HMAC over every byte above
@@ -101,6 +135,35 @@ inline void linkLmk(const uint8_t* key, size_t keyLen, uint8_t out[16]) {
   memcpy(out, full, 16);
 }
 
+inline void sha256(const uint8_t* msg, size_t len, uint8_t out[32]) {
+  mbedtls_md(mbedtls_md_info_from_type(MBEDTLS_MD_SHA256), msg, len, out);
+}
+inline void hmacSha256(const uint8_t* key, size_t keyLen, const uint8_t* msg, size_t len, uint8_t out[32]) {
+  mbedtls_md_hmac(mbedtls_md_info_from_type(MBEDTLS_MD_SHA256), key, keyLen, msg, len, out);
+}
+inline String toHex(const uint8_t* b, size_t n) {
+  static const char* H = "0123456789abcdef";
+  String s; s.reserve(n * 2);
+  for (size_t i = 0; i < n; i++) { s += H[b[i] >> 4]; s += H[b[i] & 15]; }
+  return s;
+}
+inline bool fromHex(const String& s, uint8_t* out, size_t n) {   // exactly n bytes, or false
+  if (s.length() != n * 2) return false;
+  for (size_t i = 0; i < n; i++) {
+    uint8_t v = 0;
+    for (int k = 0; k < 2; k++) {
+      char c = s[2 * i + k];
+      v <<= 4;
+      if (c >= '0' && c <= '9') v |= c - '0';
+      else if (c >= 'a' && c <= 'f') v |= c - 'a' + 10;
+      else if (c >= 'A' && c <= 'F') v |= c - 'A' + 10;
+      else return false;
+    }
+    out[i] = v;
+  }
+  return true;
+}
+
 // Constant-time compare (does not leak how many bytes matched).
 inline bool sameBytes(const uint8_t* a, const uint8_t* b, size_t n) {
   uint8_t diff = 0;
@@ -117,13 +180,18 @@ inline bool linkWellFormed(const LinkPacket& p, int len) {
 // Packet types that change what a board does. They must carry the
 // receiver's current boot ID, so recordings from before a restart are useless.
 inline bool linkNeedsFreshness(uint8_t type) {
-  return type == L_CMD || type == L_PEER_EVENT || type == L_PEER_ALARM;
+  return type == L_CMD || type == L_PEER_EVENT || type == L_PEER_ALARM ||
+         type == L_PC_CMD || type == L_LOGIN_RESP;
 }
 
 // Boot ID = (boot counter << 16) | 16 random bits. The boot counter is kept in
 // flash and only goes up, so a recorded HELLO from an OLDER boot can never be
 // replayed to reset the replay protection. (If a board's flash is fully erased,
 // its counter restarts at 1: then restart the other boards too.)
+//
+// After WE restart, only a HELLO is accepted from each sender. Whoever sees a
+// packet that carries an out-of-date dstBoot answers with a HELLO at once, so
+// links come back within about a second.
 inline uint32_t makeBootId(uint32_t bootNo, uint32_t rnd) { return ((bootNo & 0xFFFF) << 16) | (rnd & 0xFFFF); }
 inline bool bootIsNewer(uint32_t a, uint32_t b) {      // is boot a later than boot b?
 #if defined(WOKWI_SIM) && WOKWI_SIM
@@ -134,19 +202,23 @@ inline bool bootIsNewer(uint32_t a, uint32_t b) {      // is boot a later than b
 }
 
 // Tracks one sender's boot ID + sequence number to reject replayed packets.
-enum TrackResult : uint8_t { TR_OK, TR_SYNCED, TR_NEW_BOOT, TR_REPLAY };
+enum TrackResult : uint8_t { TR_OK, TR_SYNCED, TR_NEW_BOOT, TR_REPLAY, TR_UNSYNCED, TR_OLD_BOOT };
 struct PeerTracker {
   bool     synced = false;
   bool     online = false;
+  bool     sendHello = false;     // the sender has an out-of-date idea of OUR boot: send it a HELLO
   uint32_t bootId = 0, lastSeq = 0, lastHeard = 0;
 
   TrackResult accept(const LinkPacket& p) {
     TrackResult r;
     if (p.type == L_HELLO && synced && p.bootId != bootId) {                 // sender restarted?
-      if (!bootIsNewer(p.bootId, bootId)) return TR_REPLAY;                  // HELLO from an older boot
+      if (!bootIsNewer(p.bootId, bootId)) return TR_OLD_BOOT;                // HELLO from an older boot
       r = TR_NEW_BOOT;
     }
-    else if (!synced)                                       r = TR_SYNCED;    // first packet since WE booted
+    else if (!synced) {                                                      // first packet since WE booted:
+      if (p.type != L_HELLO) return TR_UNSYNCED;                             // wait for its HELLO
+      r = TR_SYNCED;
+    }
     else if (p.bootId != bootId || p.seq <= lastSeq)        return TR_REPLAY; // old or copied packet
     else                                                    r = TR_OK;
     bootId = p.bootId; lastSeq = p.seq; synced = true; lastHeard = millis();
@@ -169,6 +241,7 @@ inline const char* cmdName(uint8_t c) {
     case CMD_MAINT_START: return "MAINT";   case CMD_MAINT_END: return "MAINT_END";
     case CMD_ACK_ALARM: return "ACK_ALARM"; case CMD_CLEAR_FAULT: return "CLEAR_FAULT";
     case CMD_SET_TIME: return "SET_TIME";   case CMD_RESEND_LOG: return "RESEND_LOG";
+    case CMD_LOGOUT: return "LOGOUT";
     default: return "UNKNOWN";
   }
 }

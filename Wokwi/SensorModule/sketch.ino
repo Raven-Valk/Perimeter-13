@@ -41,6 +41,8 @@
 #define BENCH_COMMANDS  1    // 1 = type commands (arm, disarm, ...) in Serial Monitor to test
                              //     without the gateway. MUST be 0 for the demo: USB would bypass card + PIN.
 #define SIDE_PAIRS_WITH_OWN_WALL 1   // 1 = this module's SIDE + WALL firing within 20 s also confirms
+#define ALLOW_UNENCRYPTED 0  // 0 = a radio link is only used once it is encrypted (MACs set in secrets.h).
+                             // 1 = also use links without MACs (signed but readable). Setup/testing only.
 
 #include <WiFi.h>
 #include <esp_now.h>
@@ -65,6 +67,8 @@ struct PinUser;
 //    Sensor Module A, Sensor Module B, Gateway, PC dongle.
 //  Keep this file IDENTICAL in every sketch folder.
 //
+//  Links:  Module A <-> Module B,  Module A/B <-> Gateway,  Gateway <-> PC dongle.
+//
 //  Every packet is:
 //    * signed with HMAC-SHA256 using the key of that one link
 //      (A<->B, A<->Gateway, B<->Gateway, Gateway<->PC each have their own key),
@@ -78,6 +82,10 @@ struct PinUser;
 #include <Arduino.h>
 #include <esp_task_wdt.h>
 #include "mbedtls/md.h"
+
+// Declared early so the Arduino IDE / Wokwi auto-prototypes compile when this
+// file is pasted into a single-file sketch.
+struct LinkPacket;
 
 #define LINK_VERSION    3
 #define ESPNOW_CHANNEL  1      // every board must use the same Wi-Fi channel
@@ -101,9 +109,25 @@ enum LinkType : uint8_t {
   L_PEER_EVENT = 5,  // module -> module: one of my zones fired (code = zone, arg = age in ms)
   L_PEER_ALARM = 6,  // module -> module: I confirmed an intrusion, sound too (arg = alarm no., text = why)
   L_CMD        = 7,  // gateway -> module: command (code = Cmd, role, arg, text = "user@source")
-  L_CMD_RESULT = 8,  // module -> gateway: result (code = Cmd, result, arg = the command's seq, text = reason)
-  L_TYPE_MAX   = 8
+  L_CMD_RESULT = 8,  // result of a command (code = Cmd, result, arg = the command packet's seq, text = details)
+                     //   module -> gateway, and gateway -> PC
+  // ---- PC dongle <-> gateway ----
+  L_LOGIN_REQ    = 9,   // PC -> gateway: text = user name. Gateway answers with a challenge.
+  L_LOGIN_CHAL   = 10,  // gateway -> PC: text = 32 hex chars (16-byte random challenge)
+  L_LOGIN_RESP   = 11,  // PC -> gateway: text = "user:" + hex(HMAC-SHA256(pwHash, challenge || user))
+  L_LOGIN_RESULT = 12,  // gateway -> PC: result OK/DENIED, role, session = new session ID (0 = none), text = message
+  L_PC_CMD       = 13,  // PC -> gateway: code = Cmd, target, arg, session = session ID
+  L_TYPE_MAX     = 13
 };
+//  PC password: the gateway stores
+//      pwHash = PBKDF2-HMAC-SHA256(password, salt = "p13-pc:" + user, 100000 rounds, 32 bytes)
+//  (hex). Only the PC ever computes it (slow on purpose, so guessing is slow).
+//  The password never travels; the PC proves it knows it by answering the random
+//  challenge. Status to the PC: L_STATUS with code = the node it describes.
+//
+//  L_CMD (gateway -> module): logNo = command ID (the same on every retry; the
+//  module answers a repeat with its first result instead of running it twice;
+//  0 = no ID). For CMD_RESEND_LOG: arg = first line, session = last line (0 = no limit).
 
 enum Cmd : uint8_t {
   CMD_ARM = 1, CMD_DISARM = 2,
@@ -113,12 +137,22 @@ enum Cmd : uint8_t {
   CMD_CLEAR_FAULT = 6,   // clear tamper / fault (MAINTENANCE only)
   CMD_SET_TIME = 7,      // arg = Unix time (seconds)
   CMD_RESEND_LOG = 8,    // arg = first log line number wanted
-  CMD_MAX = 8
+  CMD_LOGOUT = 9,        // PC -> gateway: end the session
+  CMD_MAX = 9
 };
+// Command target (L_PC_CMD): 0 = both modules, or NODE_MOD_A / NODE_MOD_B / NODE_GATEWAY
+const uint8_t TARGET_BOTH = 0;
 enum CmdResult : uint8_t { RES_OK = 0, RES_REFUSED = 1, RES_DENIED = 2, RES_BAD = 3 };
 enum Role : uint8_t { R_NONE = 0, R_OPERATOR = 1, R_MAINTENANCE = 2 };
 enum ZoneCode : uint8_t { ZONE_WALL = 1, ZONE_SIDE = 2 };
 enum Health : uint8_t { H_OK = 0, H_WARMUP = 1, H_STUCK = 2, H_OFFLINE = 3 };
+
+// Sensor module states, as sent in LinkPacket.state (the module's own enum must match).
+enum ModState : uint8_t { MS_BOOT, MS_DISARMED, MS_ARMED, MS_INTRUSION, MS_TAMPER_FAULT, MS_MAINTENANCE, MS_RECOVERY, MS_COUNT };
+inline const char* modStateShort(uint8_t s) {      // 3 letters, for the gateway LCD
+  static const char* N[] = { "BT ", "DIS", "ARM", "ALM", "TMP", "MNT", "REC" };
+  return s < MS_COUNT ? N[s] : "?? ";
+}
 
 #pragma pack(push, 1)
 struct LinkPacket {
@@ -137,6 +171,8 @@ struct LinkPacket {
   uint8_t  role;           // L_CMD: role of the user who gave the command
   uint8_t  result;         // L_CMD_RESULT: CmdResult
   uint32_t arg;            // number argument, depending on type
+  uint32_t session;        // L_PC_CMD / L_LOGIN_RESULT: session ID
+  uint8_t  target;         // L_PC_CMD: which board the command is for (TARGET_BOTH, NODE_...)
   uint8_t  textLen;        // bytes used in text[]
   char     text[LINK_TEXT_MAX];
   uint8_t  sig[SIG_LEN];   // HMAC over every byte above
@@ -162,6 +198,35 @@ inline void linkLmk(const uint8_t* key, size_t keyLen, uint8_t out[16]) {
   memcpy(out, full, 16);
 }
 
+inline void sha256(const uint8_t* msg, size_t len, uint8_t out[32]) {
+  mbedtls_md(mbedtls_md_info_from_type(MBEDTLS_MD_SHA256), msg, len, out);
+}
+inline void hmacSha256(const uint8_t* key, size_t keyLen, const uint8_t* msg, size_t len, uint8_t out[32]) {
+  mbedtls_md_hmac(mbedtls_md_info_from_type(MBEDTLS_MD_SHA256), key, keyLen, msg, len, out);
+}
+inline String toHex(const uint8_t* b, size_t n) {
+  static const char* H = "0123456789abcdef";
+  String s; s.reserve(n * 2);
+  for (size_t i = 0; i < n; i++) { s += H[b[i] >> 4]; s += H[b[i] & 15]; }
+  return s;
+}
+inline bool fromHex(const String& s, uint8_t* out, size_t n) {   // exactly n bytes, or false
+  if (s.length() != n * 2) return false;
+  for (size_t i = 0; i < n; i++) {
+    uint8_t v = 0;
+    for (int k = 0; k < 2; k++) {
+      char c = s[2 * i + k];
+      v <<= 4;
+      if (c >= '0' && c <= '9') v |= c - '0';
+      else if (c >= 'a' && c <= 'f') v |= c - 'a' + 10;
+      else if (c >= 'A' && c <= 'F') v |= c - 'A' + 10;
+      else return false;
+    }
+    out[i] = v;
+  }
+  return true;
+}
+
 // Constant-time compare (does not leak how many bytes matched).
 inline bool sameBytes(const uint8_t* a, const uint8_t* b, size_t n) {
   uint8_t diff = 0;
@@ -178,13 +243,18 @@ inline bool linkWellFormed(const LinkPacket& p, int len) {
 // Packet types that change what a board does. They must carry the
 // receiver's current boot ID, so recordings from before a restart are useless.
 inline bool linkNeedsFreshness(uint8_t type) {
-  return type == L_CMD || type == L_PEER_EVENT || type == L_PEER_ALARM;
+  return type == L_CMD || type == L_PEER_EVENT || type == L_PEER_ALARM ||
+         type == L_PC_CMD || type == L_LOGIN_RESP;
 }
 
 // Boot ID = (boot counter << 16) | 16 random bits. The boot counter is kept in
 // flash and only goes up, so a recorded HELLO from an OLDER boot can never be
 // replayed to reset the replay protection. (If a board's flash is fully erased,
 // its counter restarts at 1: then restart the other boards too.)
+//
+// After WE restart, only a HELLO is accepted from each sender. Whoever sees a
+// packet that carries an out-of-date dstBoot answers with a HELLO at once, so
+// links come back within about a second.
 inline uint32_t makeBootId(uint32_t bootNo, uint32_t rnd) { return ((bootNo & 0xFFFF) << 16) | (rnd & 0xFFFF); }
 inline bool bootIsNewer(uint32_t a, uint32_t b) {      // is boot a later than boot b?
 #if defined(WOKWI_SIM) && WOKWI_SIM
@@ -195,19 +265,23 @@ inline bool bootIsNewer(uint32_t a, uint32_t b) {      // is boot a later than b
 }
 
 // Tracks one sender's boot ID + sequence number to reject replayed packets.
-enum TrackResult : uint8_t { TR_OK, TR_SYNCED, TR_NEW_BOOT, TR_REPLAY };
+enum TrackResult : uint8_t { TR_OK, TR_SYNCED, TR_NEW_BOOT, TR_REPLAY, TR_UNSYNCED, TR_OLD_BOOT };
 struct PeerTracker {
   bool     synced = false;
   bool     online = false;
+  bool     sendHello = false;     // the sender has an out-of-date idea of OUR boot: send it a HELLO
   uint32_t bootId = 0, lastSeq = 0, lastHeard = 0;
 
   TrackResult accept(const LinkPacket& p) {
     TrackResult r;
     if (p.type == L_HELLO && synced && p.bootId != bootId) {                 // sender restarted?
-      if (!bootIsNewer(p.bootId, bootId)) return TR_REPLAY;                  // HELLO from an older boot
+      if (!bootIsNewer(p.bootId, bootId)) return TR_OLD_BOOT;                // HELLO from an older boot
       r = TR_NEW_BOOT;
     }
-    else if (!synced)                                       r = TR_SYNCED;    // first packet since WE booted
+    else if (!synced) {                                                      // first packet since WE booted:
+      if (p.type != L_HELLO) return TR_UNSYNCED;                             // wait for its HELLO
+      r = TR_SYNCED;
+    }
     else if (p.bootId != bootId || p.seq <= lastSeq)        return TR_REPLAY; // old or copied packet
     else                                                    r = TR_OK;
     bootId = p.bootId; lastSeq = p.seq; synced = true; lastHeard = millis();
@@ -230,6 +304,7 @@ inline const char* cmdName(uint8_t c) {
     case CMD_MAINT_START: return "MAINT";   case CMD_MAINT_END: return "MAINT_END";
     case CMD_ACK_ALARM: return "ACK_ALARM"; case CMD_CLEAR_FAULT: return "CLEAR_FAULT";
     case CMD_SET_TIME: return "SET_TIME";   case CMD_RESEND_LOG: return "RESEND_LOG";
+    case CMD_LOGOUT: return "LOGOUT";
     default: return "UNKNOWN";
   }
 }
@@ -433,6 +508,10 @@ const uint8_t ALLOWED[] = {      // allowed transitions; anything else is refuse
   /* RECOVERY     */ ST(S_ARMED) | ST(S_DISARMED) | ST(S_TAMPER_FAULT) | ST(S_INTRUSION),
 };
 const char* stateName(uint8_t s) { return s < STATE_COUNT ? STATE_NAMES[s] : "INVALID"; }
+// The gateway reads our state number: keep it in step with link_protocol.h
+static_assert((int)S_BOOT == MS_BOOT && (int)S_DISARMED == MS_DISARMED && (int)S_ARMED == MS_ARMED &&
+              (int)S_INTRUSION == MS_INTRUSION && (int)S_TAMPER_FAULT == MS_TAMPER_FAULT &&
+              (int)S_MAINTENANCE == MS_MAINTENANCE && (int)S_RECOVERY == MS_RECOVERY, "state numbers must match ModState");
 
 State    state          = S_BOOT;
 uint32_t stateEnteredAt = 0;
@@ -679,6 +758,9 @@ bool     radioReady = false;
 
 bool macIsSet(const uint8_t* m) { for (int i = 0; i < 6; i++) if (m[i]) return true; return false; }
 
+// A link is only used when it is encrypted, unless ALLOW_UNENCRYPTED (Wokwi has no encryption).
+bool linkUsable(const PeerLink& L) { return WOKWI_SIM || ALLOW_UNENCRYPTED || L.encrypted; }
+
 #if WOKWI_SIM
 #include <PubSubClient.h>
 WiFiClient   mqttNet;
@@ -755,7 +837,7 @@ void radioBegin() {
 
 void linkSend(PeerLink& L, uint8_t type, uint8_t code, uint8_t role, uint8_t result,
               uint32_t arg, uint32_t no, const char* text) {
-  if (!radioReady) return;
+  if (!radioReady || !linkUsable(L)) return;
   LinkPacket p = {};
   p.version = LINK_VERSION; p.src = MY_NODE; p.dst = L.node; p.type = type;
   p.bootId = myBoot; p.seq = ++mySeq;
@@ -797,34 +879,44 @@ void queueLog(const String& line, uint32_t no) {
 
 // ---------------- re-sending old log lines on request ----------------
 bool     resendActive = false;
-uint32_t resendFrom = 0;
+uint32_t resendFrom = 0, resendTo = 0;            // resendTo 0 = no upper limit
+uint32_t logRotations = 0, resendRot = 0;
 uint8_t  resendFile = 0;
 size_t   resendPos = 0;
 uint16_t resendSent = 0;
 bool     fsOk = false;
 
 void startResend(uint32_t from) {
-  resendActive = fsOk; resendFrom = from; resendFile = 0; resendPos = 0; resendSent = 0;
+  resendActive = fsOk; resendFrom = from; resendFile = 0; resendPos = 0; resendSent = 0; resendRot = logRotations;
 }
 
 void resendNextLine() {                        // sends at most one line per call
-  const char* files[] = { "/log_old.csv", "/log.csv" };
-  for (uint8_t scanned = 0; scanned < 64 && resendFile < 2; ) {
-    File f = LittleFS.open(files[resendFile], FILE_READ);
-    if (!f || resendPos >= f.size()) { if (f) f.close(); resendFile++; resendPos = 0; continue; }
-    f.seek(resendPos);
-    String line = f.readStringUntil('\n');
-    resendPos = f.position();
-    f.close();
-    scanned++;
-    line.trim();
-    uint32_t no = (uint32_t)line.toInt();      // first column = log line number (header -> 0)
-    if (no == 0 || no < resendFrom) continue;
-    linkSend(gwLink, L_LOG, 1, 0, 0, 0, no, line.c_str());
-    if (++resendSent >= RESEND_MAX_LINES) resendActive = false;
-    return;
+  if (resendRot != logRotations) {             // the log rotated: start the scan again
+    resendRot = logRotations; resendFile = 0; resendPos = 0;   // (the gateway drops lines it already has)
   }
-  if (resendFile >= 2) resendActive = false;
+  const char* files[] = { "/log_old.csv", "/log.csv" };
+  while (resendFile < 2) {
+    File f = LittleFS.open(files[resendFile], FILE_READ);
+    if (!f) { resendFile++; resendPos = 0; continue; }
+    f.seek(resendPos);
+    for (uint8_t scanned = 0; scanned < 64 && f.available(); scanned++) {
+      String line = f.readStringUntil('\n');
+      resendPos = f.position();
+      line.trim();
+      uint32_t no = (uint32_t)line.toInt();    // first column = log line number (header -> 0)
+      if (no == 0 || no < resendFrom) continue;
+      f.close();
+      if (resendTo && no > resendTo) { resendActive = false; return; }
+      linkSend(gwLink, L_LOG, 1, 0, 0, 0, no, line.c_str());
+      if (++resendSent >= RESEND_MAX_LINES) resendActive = false;
+      return;
+    }
+    bool more = f.available();
+    f.close();
+    if (more) return;                          // 64 lines scanned: carry on next time
+    resendFile++; resendPos = 0;
+  }
+  resendActive = false;
 }
 
 // ---------------- alarm to the other module ----------------
@@ -856,12 +948,26 @@ void reject(uint8_t kind, const String& why) {
 }
 
 // ---------------- handlers for verified packets ----------------
+// The gateway retries a command if our answer is lost. A retry carries the
+// same command ID: answer it with the first result instead of running it twice.
+uint32_t lastCmdBoot = 0, lastCmdId = 0;
+uint8_t  lastCmdCode = 0, lastCmdRes = 0;
+String   lastCmdWhy = "";
+
 void onCommand(const LinkPacket& p) {
+  uint32_t id = p.logNo, gwBootNow = p.bootId;     // copies: packed fields
+  uint8_t  code = p.code;
+  if (id && gwBootNow == lastCmdBoot && id == lastCmdId && code == lastCmdCode) {
+    linkSend(gwLink, L_CMD_RESULT, code, p.role, lastCmdRes, p.seq, 0, lastCmdWhy.c_str());
+    return;
+  }
   String who = textOf(p);
   if (!who.length()) who = "gateway";
+  if (code == CMD_RESEND_LOG) resendTo = p.session;
   String why;
-  uint8_t res = applyCommand(p.code, p.role, who, p.arg, why);
-  linkSend(gwLink, L_CMD_RESULT, p.code, p.role, res, p.seq, 0, why.c_str());
+  uint8_t res = applyCommand(code, p.role, who, p.arg, why);
+  if (id) { lastCmdBoot = gwBootNow; lastCmdId = id; lastCmdCode = code; lastCmdRes = res; lastCmdWhy = why; }
+  linkSend(gwLink, L_CMD_RESULT, code, p.role, res, p.seq, 0, why.c_str());
 }
 
 void onPeerEvent(const LinkPacket& p) {
@@ -898,16 +1004,20 @@ void handlePacket(const RxItem& it) {
   if (p.dst != MY_NODE) return;                    // meant for another board (signed broadcast)
   PeerLink* L = p.src == NODE_GATEWAY ? &gwLink : p.src == PEER_NODE ? &peerLink : nullptr;
   if (!L) { reject(RJ_UNKNOWN, "Unknown sender"); return; }
+  if (!linkUsable(*L)) { reject(RJ_OTHER, String(L->name) + ": link not encrypted - set MACs"); return; }
 #if !WOKWI_SIM
   if (L->macSet && memcmp(it.src, L->mac, 6) != 0) { reject(RJ_MAC, String(L->name) + ": MAC not allowed"); return; }
 #endif
   uint8_t exp[SIG_LEN];
   linkSign(L->key, 32, p, exp);
   if (!sameBytes(exp, p.sig, SIG_LEN)) { reject(RJ_SIG, String(L->name) + ": bad signature (spoofed?)"); return; }
+  if (p.dstBoot != myBoot) L->trk.sendHello = true;          // it doesn't know our current boot yet
   if (linkNeedsFreshness(p.type) && p.dstBoot != myBoot) {
     reject(RJ_STALE, String(L->name) + ": stale (made before our restart)"); return;
   }
   TrackResult tr = L->trk.accept(p);
+  if (tr == TR_UNSYNCED) return;                             // waiting for its HELLO (about 1 s)
+  if (tr == TR_OLD_BOOT) { reject(RJ_REPLAY, String(L->name) + ": older boot number refused (flash erased? restart this board)"); return; }
   if (tr == TR_REPLAY) { reject(RJ_REPLAY, String(L->name) + ": replayed/old packet"); return; }
   if (tr == TR_NEW_BOOT) logEvent("COMM", String(L->name) + " restarted (" + resetReasonName(p.resetReason) + ")");
   if (!L->trk.online) {
@@ -959,8 +1069,12 @@ void linkLoop(uint32_t now) {
   if (now - lastStatus >= STATUS_EVERY_MS) {       // 1 s beat to both; every 10th is a HELLO
     lastStatus = now;
     String st = statusText();
-    linkSend(gwLink,   ++gwLink.beats   % 10 == 1 ? L_HELLO : L_STATUS, 0, 0, 0, unixNow(), 0, st.c_str());
-    linkSend(peerLink, ++peerLink.beats % 10 == 1 ? L_HELLO : L_STATUS, 0, 0, 0, unixNow(), 0, st.c_str());
+    PeerLink* both[2] = { &gwLink, &peerLink };
+    for (PeerLink* L : both) {
+      bool hello = ++L->beats % 10 == 1 || L->trk.sendHello;
+      L->trk.sendHello = false;
+      linkSend(*L, hello ? L_HELLO : L_STATUS, 0, 0, 0, unixNow(), 0, st.c_str());
+    }
   } else if (gwLink.trk.online) {                  // logs only while the gateway is listening
     if (qCount > 0) {
       linkSend(gwLink, L_LOG, 0, 0, 0, 0, logQNo[qHead], logQ[qHead]);
@@ -995,6 +1109,7 @@ void logEvent(const char* type, const String& event, const char* zone,
     f.close();
     LittleFS.remove("/log_old.csv");
     LittleFS.rename("/log.csv", "/log_old.csv");
+    logRotations++;
     f = LittleFS.open("/log.csv", FILE_APPEND);
     if (!f) return;
   }
@@ -1012,6 +1127,25 @@ void startLogDump() {
   if (!fsOk) { Serial.println("No log storage"); return; }
   dumpActive = true; dumpFile = 0; dumpPos = 0;
   Serial.println("----- EVENT LOG START -----");
+}
+
+// The number of the last line in the log file, so numbering carries on
+// exactly after a restart (0 = no log yet).
+uint32_t lastNumberInLog() {
+  const char* files[] = { "/log.csv", "/log_old.csv" };
+  for (const char* name : files) {
+    File f = LittleFS.open(name, FILE_READ);
+    if (!f) continue;
+    size_t sz = f.size();
+    f.seek(sz > 400 ? sz - 400 : 0);
+    String tail = f.readString();
+    f.close();
+    tail.trim();
+    int nl = tail.lastIndexOf('\n');
+    uint32_t no = (uint32_t)(nl >= 0 ? tail.substring(nl + 1) : tail).toInt();
+    if (no) return no;
+  }
+  return 0;
 }
 
 void dumpStep() {
@@ -1566,7 +1700,6 @@ void setup() {
   // Persistent values (validated: corrupted data is ignored)
   prefs.begin("p13mod", false);
   bootNo            = prefs.getUInt("boot", 0) + 1;  prefs.putUInt("boot", bootNo);
-  logNo             = prefs.getUInt("logNo", 0) + 16; prefs.putUInt("logNo", logNo);   // never reuse a number
   failedAttempts    = prefs.getUChar("failed", 0);
   lockoutLevel      = min((int)prefs.getUChar("lockLvl", 0), (int)MAX_LOCKOUT_LEVEL);
   lockoutRemainingS = prefs.getUInt("lockRem", 0);
@@ -1577,6 +1710,10 @@ void setup() {
   lastLockTick      = millis();
 
   fsOk = LittleFS.begin(true);
+  uint32_t savedNo = prefs.getUInt("logNo", 0);
+  uint32_t fileNo  = fsOk ? lastNumberInLog() : 0;   // carry on exactly after the last line
+  logNo = fileNo ? max(fileNo, savedNo) : savedNo + 16;   // no file: skip ahead, never reuse a number
+  prefs.putUInt("logNo", logNo);
   Wire.begin(PIN_SDA, PIN_SCL);
   display.begin();
   radioBegin();
@@ -1596,8 +1733,10 @@ void setup() {
     logEvent("SYSTEM", "MAC differs from secrets.h - wrong MODULE_ID?", "-", "WARN");
   PeerLink* both[2] = { &gwLink, &peerLink };
   for (PeerLink* L : both) {
-    if (!L->macSet)         logEvent("COMM", String(L->name) + " MAC not set: signed, NOT encrypted", "-", "WARN");
-    else if (!L->encrypted) logEvent("COMM", String(L->name) + " encryption setup FAILED: signed only", "-", "ERROR");
+    if (linkUsable(*L) && L->encrypted) continue;
+    String why = L->macSet ? " encryption setup FAILED" : " MAC not set in secrets.h";
+    if (ALLOW_UNENCRYPTED) logEvent("COMM", String(L->name) + why + ": signed, NOT encrypted", "-", "WARN");
+    else                   logEvent("COMM", String(L->name) + why + ": link OFF", "-", "ERROR");
   }
 #endif
 #if BENCH_COMMANDS

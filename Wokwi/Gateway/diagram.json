@@ -1,0 +1,354 @@
+{
+  "version": 1,
+  "author": "Pinnacle 1 Project 13 - Gateway",
+  "editor": "wokwi",
+  "parts": [
+    {
+      "type": "wokwi-esp32-devkit-v1",
+      "id": "esp",
+      "top": 0,
+      "left": 0,
+      "attrs": {}
+    },
+    {
+      "type": "wokwi-breadboard-half",
+      "id": "bb1",
+      "top": 430,
+      "left": -420,
+      "attrs": {}
+    },
+    {
+      "type": "wokwi-lcd1602",
+      "id": "lcd1",
+      "top": -230,
+      "left": -20,
+      "attrs": {
+        "pins": "i2c"
+      }
+    },
+    {
+      "type": "board-mfrc522",
+      "id": "rfid1",
+      "top": -20,
+      "left": 330,
+      "attrs": {}
+    },
+    {
+      "type": "wokwi-membrane-keypad",
+      "id": "keypad1",
+      "top": -60,
+      "left": -520,
+      "attrs": {}
+    },
+    {
+      "type": "wokwi-slide-switch",
+      "id": "tamper",
+      "top": 330,
+      "left": 60,
+      "attrs": {
+        "value": "",
+        "bounce": "0"
+      }
+    },
+    {
+      "type": "wokwi-resistor",
+      "id": "rTamper",
+      "top": 280,
+      "left": 40,
+      "attrs": {
+        "value": "2200"
+      }
+    },
+    {
+      "type": "wokwi-led",
+      "id": "ledGreen",
+      "top": 150,
+      "left": 450,
+      "attrs": {
+        "color": "green"
+      }
+    },
+    {
+      "type": "wokwi-resistor",
+      "id": "rGreen",
+      "top": 110,
+      "left": 430,
+      "attrs": {
+        "value": "220"
+      }
+    },
+    {
+      "type": "wokwi-led",
+      "id": "ledRed",
+      "top": 150,
+      "left": 510,
+      "attrs": {
+        "color": "red"
+      }
+    },
+    {
+      "type": "wokwi-resistor",
+      "id": "rRed",
+      "top": 110,
+      "left": 490,
+      "attrs": {
+        "value": "220"
+      }
+    },
+    {
+      "type": "wokwi-led",
+      "id": "ledYellow",
+      "top": 150,
+      "left": 570,
+      "attrs": {
+        "color": "yellow"
+      }
+    },
+    {
+      "type": "wokwi-resistor",
+      "id": "rYellow",
+      "top": 110,
+      "left": 550,
+      "attrs": {
+        "value": "220"
+      }
+    }
+  ],
+  "connections": [
+    [
+      "esp:TX0",
+      "$serialMonitor:RX",
+      "",
+      []
+    ],
+    [
+      "esp:RX0",
+      "$serialMonitor:TX",
+      "",
+      []
+    ],
+    [
+      "esp:VIN",
+      "bb1:tp.1",
+      "red",
+      []
+    ],
+    [
+      "esp:3V3",
+      "bb1:bp.1",
+      "orange",
+      []
+    ],
+    [
+      "esp:GND.1",
+      "bb1:tn.1",
+      "black",
+      []
+    ],
+    [
+      "esp:GND.2",
+      "bb1:bn.1",
+      "black",
+      []
+    ],
+    [
+      "bb1:tn.25",
+      "bb1:bn.25",
+      "black",
+      []
+    ],
+    [
+      "esp:D21",
+      "lcd1:SDA",
+      "blue",
+      []
+    ],
+    [
+      "esp:D22",
+      "lcd1:SCL",
+      "purple",
+      []
+    ],
+    [
+      "lcd1:VCC",
+      "bb1:tp.3",
+      "red",
+      []
+    ],
+    [
+      "lcd1:GND",
+      "bb1:tn.3",
+      "black",
+      []
+    ],
+    [
+      "esp:D5",
+      "rfid1:SDA",
+      "blue",
+      []
+    ],
+    [
+      "esp:D18",
+      "rfid1:SCK",
+      "blue",
+      []
+    ],
+    [
+      "esp:D23",
+      "rfid1:MOSI",
+      "blue",
+      []
+    ],
+    [
+      "esp:D19",
+      "rfid1:MISO",
+      "blue",
+      []
+    ],
+    [
+      "rfid1:3.3V",
+      "bb1:bp.3",
+      "orange",
+      []
+    ],
+    [
+      "rfid1:RST",
+      "bb1:bp.4",
+      "orange",
+      []
+    ],
+    [
+      "rfid1:GND",
+      "bb1:bn.3",
+      "black",
+      []
+    ],
+    [
+      "esp:D13",
+      "keypad1:R1",
+      "violet",
+      []
+    ],
+    [
+      "esp:D14",
+      "keypad1:R2",
+      "violet",
+      []
+    ],
+    [
+      "esp:D27",
+      "keypad1:R3",
+      "violet",
+      []
+    ],
+    [
+      "esp:D26",
+      "keypad1:R4",
+      "violet",
+      []
+    ],
+    [
+      "esp:D25",
+      "keypad1:C1",
+      "violet",
+      []
+    ],
+    [
+      "esp:D33",
+      "keypad1:C2",
+      "violet",
+      []
+    ],
+    [
+      "esp:D32",
+      "keypad1:C3",
+      "violet",
+      []
+    ],
+    [
+      "esp:D4",
+      "keypad1:C4",
+      "violet",
+      []
+    ],
+    [
+      "rTamper:1",
+      "esp:VN",
+      "gray",
+      []
+    ],
+    [
+      "rTamper:2",
+      "bb1:bp.8",
+      "orange",
+      []
+    ],
+    [
+      "tamper:2",
+      "esp:VN",
+      "gray",
+      []
+    ],
+    [
+      "tamper:1",
+      "bb1:bn.6",
+      "black",
+      []
+    ],
+    [
+      "esp:D2",
+      "rGreen:1",
+      "green",
+      []
+    ],
+    [
+      "rGreen:2",
+      "ledGreen:A",
+      "green",
+      []
+    ],
+    [
+      "ledGreen:C",
+      "bb1:bn.10",
+      "black",
+      []
+    ],
+    [
+      "esp:TX2",
+      "rRed:1",
+      "green",
+      []
+    ],
+    [
+      "rRed:2",
+      "ledRed:A",
+      "green",
+      []
+    ],
+    [
+      "ledRed:C",
+      "bb1:bn.11",
+      "black",
+      []
+    ],
+    [
+      "esp:RX2",
+      "rYellow:1",
+      "green",
+      []
+    ],
+    [
+      "rYellow:2",
+      "ledYellow:A",
+      "green",
+      []
+    ],
+    [
+      "ledYellow:C",
+      "bb1:bn.12",
+      "black",
+      []
+    ]
+  ],
+  "dependencies": {}
+}

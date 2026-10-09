@@ -24,7 +24,7 @@ You should see:
 - **Serial Monitor:** `[sim] MQTT connected`, then `Module B link UP` (in A) and `Module A link UP` (in B).
 - **LCD:** "A Warming up 5s", then **A DISARMED**.
 
-"GW link DOWN" is expected, because the gateway doesn't exist yet.
+"GW link DOWN" is expected until you also run the gateway (see `../Gateway/README.md` for the three-tab setup).
 
 ## Controls
 

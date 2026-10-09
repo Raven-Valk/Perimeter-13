@@ -1,3 +1,4 @@
+#include <openssl/evp.h>
 #include <cstdio>
 #include "link_protocol.h"
 static const uint8_t K_AGW[32] = {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32};
@@ -23,7 +24,7 @@ Verdict moduleA(const LinkPacket& p, int len=sizeof(LinkPacket)){
   if(p.src==NODE_GATEWAY){key=K_AGW;t=&gwT;} else if(p.src==NODE_MOD_B){key=K_AB;t=&peerT;} else return R_UNKNOWN;
   if(!verify(p,key)) return R_SIG;
   if(linkNeedsFreshness(p.type) && p.dstBoot!=MY_BOOT) return R_STALE;
-  if(t->accept(p)==TR_REPLAY) return R_REPLAY;
+  TrackResult tr=t->accept(p); if(tr==TR_REPLAY||tr==TR_OLD_BOOT||tr==TR_UNSYNCED) return R_REPLAY;
   return ACCEPT;
 }
 int main(){
@@ -64,10 +65,12 @@ int main(){
   CHECK(moduleA(mk(NODE_GATEWAY,NODE_MOD_A,L_ACK,G1,5,0,K_AGW))==ACCEPT, "Plain ACK needs no boot binding: accepted");
   CHECK(moduleA(mk(NODE_GATEWAY,NODE_MOD_B,L_CMD,G1,6,MY_BOOT,K_BGW,CMD_DISARM,R_OPERATOR))==IGNORE, "Packet for Module B: ignored by A");
   CHECK(moduleA(mk(NODE_DONGLE,NODE_MOD_A,L_CMD,5,1,MY_BOOT,K_AGW,CMD_DISARM,R_OPERATOR))==R_UNKNOWN, "PC dongle talking to A directly: unknown sender");
-  CHECK(moduleA(mk(NODE_MOD_B,NODE_MOD_A,L_PEER_EVENT,BB1,1,MY_BOOT,K_AB,ZONE_WALL))==ACCEPT, "Peer WALL event from B: accepted");
-  CHECK(moduleA(mk(NODE_MOD_B,NODE_MOD_A,L_PEER_EVENT,BB1,1,MY_BOOT,K_AB,ZONE_WALL))==R_REPLAY, "Replayed peer event (fake corroboration): rejected");
-  CHECK(moduleA(mk(NODE_MOD_B,NODE_MOD_A,L_PEER_ALARM,BB1,2,0x1234,K_AB))==R_STALE, "Old peer alarm from before A restarted: rejected");
-  CHECK(moduleA(mk(NODE_MOD_B,NODE_MOD_A,L_PEER_ALARM,BB1,3,MY_BOOT,K_BGW))==R_SIG, "Peer alarm signed with wrong key: rejected");
+  CHECK(moduleA(mk(NODE_MOD_B,NODE_MOD_A,L_PEER_EVENT,BB1,1,MY_BOOT,K_AB,ZONE_WALL))==R_REPLAY, "Peer event before B's HELLO: waits (not acted on)");
+  CHECK(moduleA(mk(NODE_MOD_B,NODE_MOD_A,L_HELLO,BB1,2,0,K_AB))==ACCEPT, "Module B HELLO: link syncs");
+  CHECK(moduleA(mk(NODE_MOD_B,NODE_MOD_A,L_PEER_EVENT,BB1,3,MY_BOOT,K_AB,ZONE_WALL))==ACCEPT, "Peer WALL event from B: accepted");
+  CHECK(moduleA(mk(NODE_MOD_B,NODE_MOD_A,L_PEER_EVENT,BB1,3,MY_BOOT,K_AB,ZONE_WALL))==R_REPLAY, "Replayed peer event (fake corroboration): rejected");
+  CHECK(moduleA(mk(NODE_MOD_B,NODE_MOD_A,L_PEER_ALARM,BB1,4,0x1234,K_AB))==R_STALE, "Old peer alarm from before A restarted: rejected");
+  CHECK(moduleA(mk(NODE_MOD_B,NODE_MOD_A,L_PEER_ALARM,BB1,5,MY_BOOT,K_BGW))==R_SIG, "Peer alarm signed with wrong key: rejected");
   CHECK(moduleA(mk(NODE_GATEWAY,NODE_MOD_A,L_STATUS,G2,1,0,K_AGW))==R_REPLAY, "Gateway new boot without HELLO: rejected");
   CHECK(moduleA(mk(NODE_GATEWAY,NODE_MOD_A,L_HELLO,G2,1,0,K_AGW))==ACCEPT, "Gateway restart announced by HELLO: accepted");
   CHECK(moduleA(mk(NODE_GATEWAY,NODE_MOD_A,L_CMD,G2,2,MY_BOOT,K_AGW,CMD_ARM,R_OPERATOR))==ACCEPT, "Command after gateway restart: accepted");
@@ -75,7 +78,38 @@ int main(){
   CHECK(moduleA(mk(NODE_GATEWAY,NODE_MOD_A,L_CMD,G1,40,MY_BOOT,K_AGW,CMD_DISARM,R_OPERATOR))==R_REPLAY, "...so a recorded DISARM from that boot stays rejected");
   CHECK(moduleA(mk(NODE_GATEWAY,NODE_MOD_A,L_CMD,G2,3,MY_BOOT,K_AGW,CMD_ARM,R_OPERATOR))==ACCEPT, "Real gateway traffic still accepted after that attack");
   CHECK(bootIsNewer(makeBootId(1,0),makeBootId(65535,0)), "Boot counter wrap-around (65535 -> 1) handled");
+  { PeerTracker fresh;                              // we just restarted
+    CHECK(fresh.accept(mk(NODE_GATEWAY,NODE_MOD_A,L_STATUS,G2,50,0,K_AGW))==TR_UNSYNCED, "After OUR restart: plain packets wait for the sender's HELLO");
+    CHECK(fresh.accept(mk(NODE_GATEWAY,NODE_MOD_A,L_HELLO,G2,51,0,K_AGW))==TR_SYNCED, "...the HELLO syncs the link");
+    CHECK(fresh.accept(mk(NODE_GATEWAY,NODE_MOD_A,L_HELLO,G1,52,0,K_AGW))==TR_OLD_BOOT, "...a recorded HELLO from an older boot is refused (told apart in the log)");
+    CHECK(fresh.accept(mk(NODE_GATEWAY,NODE_MOD_A,L_STATUS,G2,53,0,K_AGW))==TR_OK, "...and real traffic carries on"); }
 
+
+  printf("\n-- PC link (gateway <-> dongle) --\n");
+  static const uint8_t K_PC[32] = {5,5,5};
+  LinkPacket pc=mk(NODE_DONGLE,NODE_GATEWAY,L_PC_CMD,BB1,1,0x6060,K_PC,CMD_DISARM,R_NONE);
+  pc.session=0x1234; pc.target=TARGET_BOTH; linkSign(K_PC,32,pc,pc.sig);
+  CHECK(linkWellFormed(pc,sizeof(pc)), "PC command packet (type 13) is well-formed");
+  v=pc; v.type=L_TYPE_MAX+1; CHECK(!linkWellFormed(v,sizeof(v)), "Type 14 rejected");
+  CHECK(linkNeedsFreshness(L_PC_CMD) && linkNeedsFreshness(L_LOGIN_RESP), "PC commands and login answers are tied to the gateway's boot");
+  CHECK(!linkNeedsFreshness(L_LOGIN_REQ), "Login request needs no boot binding (answered with a fresh challenge)");
+  t=pc; t.session=0x1235; CHECK(!verify(t,K_PC), "Session ID changed in transit: rejected");
+  t=pc; t.target=NODE_MOD_A; CHECK(!verify(t,K_PC), "Target changed in transit (both -> A only): rejected");
+  CHECK(!verify(pc,K_AGW), "PC packet checked with a module key: rejected");
+
+  printf("\n-- PC login (challenge-response) --\n");
+  uint8_t h[32]; PKCS5_PBKDF2_HMAC("admin123",8,(const unsigned char*)"p13-pc:admin",12,100000,EVP_sha256(),32,h);
+  CHECK(strcmp(toHex(h,32).c_str(),"7493b37e4df180c408885fd146df4792281b6b15d66e213397c9bcc8132f5e2e")==0, "Stored admin hash (gateway secrets.h) = PBKDF2(admin123, 100000 rounds)");
+  uint8_t nonce[16]; for(int i=0;i<16;i++) nonce[i]=i;
+  uint8_t msg[21]; memcpy(msg,nonce,16); memcpy(msg+16,"admin",5);
+  uint8_t r[32]; hmacSha256(h,32,msg,21,r);
+  CHECK(strcmp(toHex(r,32).c_str(),"a2b6c14afdbb735e3a3e7bb323dfca377f28d1ecbeab6f0c1a2a842b5dccf092")==0, "Gateway's expected answer matches the PC-side reference (Python)");
+  uint8_t back[32]; CHECK(fromHex(String("a2b6c14afdbb735e3a3e7bb323dfca377f28d1ecbeab6f0c1a2a842b5dccf092"),back,32) && memcmp(back,r,32)==0, "Hex round trip");
+  CHECK(!fromHex(String("abc"),back,32), "Hex of the wrong length rejected");
+  CHECK(!fromHex(String("zzb6c14afdbb735e3a3e7bb323dfca377f28d1ecbeab6f0c1a2a842b5dccf092"),back,32), "Hex with a bad character rejected");
+  uint8_t r2[32]; nonce[0]^=1; memcpy(msg,nonce,16); hmacSha256(h,32,msg,21,r2);
+  CHECK(memcmp(r,r2,32)!=0, "A different challenge needs a different answer (old answers useless)");
+  CHECK(strcmp(modStateShort(MS_INTRUSION),"ALM")==0 && strcmp(modStateShort(99),"?? ")==0, "Module state names for the gateway LCD");
   printf("\n-- ESP-NOW encryption keys --\n");
   uint8_t a[16],b[16],x[16]; linkLmk(K_AGW,32,a); linkLmk(K_AGW,32,b); linkLmk(K_BGW,32,x);
   CHECK(memcmp(a,b,16)==0, "Both ends derive the same encryption key from a link key");
