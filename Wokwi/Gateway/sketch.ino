@@ -1,10 +1,11 @@
 // =====================================================================
 //  PINNACLE 1 — PROJECT 13 — SECURE PERIMETER INTRUSION DETECTION
-//  GATEWAY  —  ESP32 DevKit V1 30-pin  —  firmware v5.4
+//  GATEWAY  —  ESP32 DevKit V1 30-pin  —  firmware v6.0
 //
-//  The control box. Runs on a power adapter; talks by radio (ESP-NOW) to
-//  Sensor Module A and Sensor Module B, and over Wi-Fi to the server laptop
-//  that runs the dashboard (MQTT inside TLS, the server's own broker).
+//  The control box, in the middle of the site. Runs on a power adapter; one of
+//  the five radios of the mesh (mesh.h) with Sensor Modules A, B, C and D at the
+//  corners, and over Wi-Fi to the server laptop that runs the dashboard (MQTT
+//  inside TLS, the server's own broker).
 //
 //  What it does:
 //    * Card + PIN on its own RFID reader and keypad, then a menu:
@@ -15,12 +16,14 @@
 //      password never reaches the gateway), 5-min idle session, own lockout.
 //      A dashboard command has priority over a keypad entry in progress.
 //    * Sends each command to the modules, collects their answers and shows
-//      them ("A:OK B:Lid open"). The modules check role and state again.
+//      them ("A:OK B:OK C:Lid open D:OK"). The modules check role and state again.
 //    * Keeps one event log for the whole system (its own events + every line
-//      from both modules), fetches lines the modules sent while the radio
+//      from the four modules), fetches lines the modules sent while the radio
 //      dropped, and gives the server any lines it missed.
-//    * Relays status (its own + both modules) to the server every second and
-//      gives the modules the real time once the server has sent it.
+//    * Sends status (its own + the four modules', with how each radio link is
+//      doing) to the server every second and gives the modules the real time.
+//    * Mesh: talks straight to each module; when a link fails, through another
+//      module. Passes on packets between modules whose own link failed.
 //    * Its own tamper switch: lid opened -> P3, and the gateway refuses all
 //      commands until a MAINTENANCE card + PIN (or dashboard admin) clears it.
 //    * Wi-Fi: joins the network in secrets.h. ESP-NOW then runs on that
@@ -58,7 +61,6 @@
 // The Arduino IDE / Wokwi auto-insert function prototypes above the first
 // function in the sketch. Declare our own types before that point.
 enum GwState : uint8_t;
-struct PeerLink;
 struct RxItem;
 struct CardUser;
 struct PcUser;
@@ -66,16 +68,20 @@ struct ModuleView;
 
 // ======== link_protocol.h (inlined for Wokwi: no extra files needed) ========
 // =====================================================================
-//  link_protocol.h  —  v3 (firmware 5.4), shared by every part of Project 13:
-//    Sensor Module A, Sensor Module B, Gateway, and the server (Server/p13server/protocol.py
+//  link_protocol.h  —  v4 (firmware 6.0), shared by every part of Project 13:
+//    Sensor Modules A, B, C, D, the Gateway, and the server (Server/p13server/protocol.py
 //    is the same format in Python). Keep this file IDENTICAL in every sketch folder.
 //
-//  Links:  Module A <-> Module B,  Module A/B <-> Gateway   (ESP-NOW radio)
-//          Gateway <-> Server                               (Wi-Fi, MQTT over TLS)
+//  Links:  a full mesh of 5 radios (ESP-NOW): A, B, C, D and the gateway each
+//          talk straight to the other 4 (10 links). If one link fails, its
+//          packets go through a third board that still hears both (mesh.h).
+//          Gateway <-> Server: Wi-Fi, MQTT over TLS.
 //
 //  Every packet is:
-//    * signed with HMAC-SHA256 using the key of that one link
-//      (A<->B, A<->Gateway, B<->Gateway, Gateway<->Server each have their own key),
+//    * signed with HMAC-SHA256 using the key of that one link (each of the 10
+//      radio links and Gateway<->Server has its own key). A relayed packet keeps
+//      the signature of the two END boards, so the board in the middle can pass
+//      it on but can't read the key, change it, or make one up,
 //    * numbered (bootId + seq) so copies and old packets are rejected,
 //    * addressed (src + dst), so a packet for A can't be fed to B,
 //    * for commands and alarms: tied to the receiver's CURRENT boot (dstBoot),
@@ -90,9 +96,11 @@ struct ModuleView;
 // Declared early so the Arduino IDE / Wokwi auto-prototypes compile when this
 // file is pasted into a single-file sketch.
 struct LinkPacket;
+struct MeshPeer;      // mesh.h
+class Mesh;
 
-#define LINK_VERSION    3
-#define FIRMWARE_VERSION "5.4"
+#define LINK_VERSION    4
+#define FIRMWARE_VERSION "6.0"
 #define ESPNOW_DEFAULT_CHANNEL 1  // until the gateway's Wi-Fi decides: the gateway uses its
                                   // network's channel and the modules find it by themselves
 #define SIG_LEN         8      // bytes of HMAC-SHA256 kept in each packet
@@ -100,14 +108,39 @@ struct LinkPacket;
 
 // Wokwi simulator only (WOKWI_SIM 1): Wokwi can't do ESP-NOW between two
 // simulations, so the same signed packets travel over a public MQTT broker.
-// Each part listens on  <base>/to/<letter>  (A, B, G = gateway, P = server).
+// Each part listens on  <base>/to/<letter>  (A, B, C, D, G = gateway, P = server).
 // The real gateway uses the same topic layout on the server's own broker:
 //   p13/<SITE_ID>/to/G  and  p13/<SITE_ID>/to/P   (see Gateway/secrets.h).
 #define MQTT_BROKER      "broker.hivemq.com"
 #define MQTT_PORT        1883
-#define MQTT_TOPIC_BASE  "pinnacle13/p13-2d386efc/v5"
+#define MQTT_TOPIC_BASE  "pinnacle13/p13-2d386efc/v6"
 
-enum LinkNode : uint8_t { NODE_NONE = 0, NODE_MOD_A = 1, NODE_MOD_B = 2, NODE_GATEWAY = 9, NODE_SERVER = 10 };
+enum LinkNode : uint8_t { NODE_NONE = 0, NODE_MOD_A = 1, NODE_MOD_B = 2, NODE_MOD_C = 3, NODE_MOD_D = 4,
+                         NODE_GATEWAY = 9, NODE_SERVER = 10 };
+inline bool isModule(uint8_t n) { return n >= NODE_MOD_A && n <= NODE_MOD_D; }
+
+// ---------------- the site: a rectangle, modules at the corners ----------------
+//        A ---- zone 2 ---- B          Each protected wall (zone) has a PIR at
+//        |                  |          both ends, mounted on the OUTSIDE face
+//     zone 1      G      zone 3        and looking along it (a "curtain").
+//        |                  |          Wall C-D has no sensors.
+//        D -----(none)----- C          G = gateway, in the middle.
+//  Zone 1 = wall A-D (PIRs "A-Z1", "D-Z1"), zone 2 = wall A-B ("A-Z2", "B-Z2"),
+//  zone 3 = wall B-C ("B-Z3", "C-Z3"). A and B have buzzers: an intrusion in a
+//  zone sounds the buzzer of each module on that wall that has one.
+const uint8_t SITE_ZONES = 3;
+const uint8_t ZONE_END1[SITE_ZONES + 1] = { 0, NODE_MOD_A, NODE_MOD_A, NODE_MOD_B };
+const uint8_t ZONE_END2[SITE_ZONES + 1] = { 0, NODE_MOD_D, NODE_MOD_B, NODE_MOD_C };
+inline uint8_t zoneBit(uint8_t z) { return z >= 1 && z <= SITE_ZONES ? 1 << (z - 1) : 0; }
+inline uint8_t zonePartner(uint8_t z, uint8_t me) {      // the module at the other end of zone z's wall
+  if (!zoneBit(z)) return NODE_NONE;
+  return ZONE_END1[z] == me ? ZONE_END2[z] : ZONE_END2[z] == me ? ZONE_END1[z] : (uint8_t)NODE_NONE;
+}
+inline uint8_t zonesOf(uint8_t node) {                  // the walls a module stands on (bit mask)
+  uint8_t m = 0;
+  for (uint8_t z = 1; z <= SITE_ZONES; z++) if (ZONE_END1[z] == node || ZONE_END2[z] == node) m |= zoneBit(z);
+  return m;
+}
 
 enum LinkType : uint8_t {
   L_HELLO      = 1,  // status beat that also says "this is my boot ID". At boot and every 10th beat.
@@ -115,8 +148,9 @@ enum LinkType : uint8_t {
   L_LOG        = 3,  // one event-log line (logNo = line number; code 1 = re-sent on request)
   L_ACK        = 4,  // gateway -> module: reply to each status beat ("link alive").
                      //   HELLO / ACK from the gateway: code = its radio channel (0 = not said)
-  L_PEER_EVENT = 5,  // module -> module: one of my zones fired (code = zone, arg = age in ms)
-  L_PEER_ALARM = 6,  // module -> module: I confirmed an intrusion, sound too (arg = alarm no., text = why)
+  L_PEER_EVENT = 5,  // module -> module at the other end of the wall: my PIR on zone `code` fired (arg = age in ms)
+  L_PEER_ALARM = 6,  // module -> the other modules: intrusion confirmed, alarm everyone
+                     //   (code = zones in alarm (bits), arg = alarm no., text = why)
   L_CMD        = 7,  // gateway -> module: command (code = Cmd, role, arg, text = "user@source")
   L_CMD_RESULT = 8,  // result of a command (code = Cmd, result, arg = the command packet's seq, text = details)
                      //   module -> gateway, and gateway -> server
@@ -149,13 +183,15 @@ enum Cmd : uint8_t {
   CMD_SET_TIME = 7,      // arg = Unix time (seconds)
   CMD_RESEND_LOG = 8,    // arg = first log line number wanted
   CMD_LOGOUT = 9,        // server -> gateway: end the session
-  CMD_MAX = 9
+  CMD_TEST_CUT = 10,     // test the relays: treat the direct link to node (arg >> 16) as broken
+                         //   for (arg & 0xFFFF) seconds (max 300; 0 = end the test). MAINTENANCE only.
+  CMD_MAX = 10
 };
-// Command target (L_PC_CMD): 0 = both modules, or NODE_MOD_A / NODE_MOD_B / NODE_GATEWAY
-const uint8_t TARGET_BOTH = 0;
+// Command target (L_PC_CMD): 0 = all four modules, or NODE_MOD_A..D / NODE_GATEWAY
+const uint8_t TARGET_ALL = 0;
+const uint32_t TEST_CUT_MAX_S = 300;
 enum CmdResult : uint8_t { RES_OK = 0, RES_REFUSED = 1, RES_DENIED = 2, RES_BAD = 3 };
 enum Role : uint8_t { R_NONE = 0, R_OPERATOR = 1, R_MAINTENANCE = 2 };
-enum ZoneCode : uint8_t { ZONE_WALL = 1, ZONE_SIDE = 2 };
 enum Health : uint8_t { H_OK = 0, H_WARMUP = 1, H_STUCK = 2, H_OFFLINE = 3 };
 
 // Sensor module states, as sent in LinkPacket.state (the module's own enum must match).
@@ -171,6 +207,8 @@ struct LinkPacket {
   uint8_t  src;            // LinkNode of the sender
   uint8_t  dst;            // LinkNode it is meant for
   uint8_t  type;           // LinkType
+  uint8_t  via;            // 0 = sent straight to dst; else the board asked to pass it on (one hop)
+  uint8_t  mesh;           // the boards the sender hears directly right now (meshBit() of each)
   uint32_t bootId;         // random number chosen at the sender's boot
   uint32_t seq;            // +1 on every packet the sender sends (replay protection)
   uint32_t dstBoot;        // the receiver's bootId as the sender last saw it (0 = unknown)
@@ -183,7 +221,7 @@ struct LinkPacket {
   uint8_t  result;         // L_CMD_RESULT: CmdResult
   uint32_t arg;            // number argument, depending on type
   uint32_t session;        // L_PC_CMD / L_LOGIN_RESULT: session ID
-  uint8_t  target;         // L_PC_CMD: which board the command is for (TARGET_BOTH, NODE_...)
+  uint8_t  target;         // L_PC_CMD: which board the command is for (TARGET_ALL, NODE_...)
   uint8_t  textLen;        // bytes used in text[]
   char     text[LINK_TEXT_MAX];
   uint8_t  sig[SIG_LEN];   // HMAC over every byte above
@@ -275,13 +313,19 @@ inline bool bootIsNewer(uint32_t a, uint32_t b) {      // is boot a later than b
 #endif
 }
 
-// Tracks one sender's boot ID + sequence number to reject replayed packets.
-enum TrackResult : uint8_t { TR_OK, TR_SYNCED, TR_NEW_BOOT, TR_REPLAY, TR_UNSYNCED, TR_OLD_BOOT };
+// Tracks one sender's boot ID + sequence numbers to reject replayed packets.
+// With relays a packet can arrive twice (straight and through another board) or
+// a little out of order, so the last 32 sequence numbers are remembered:
+// each one is accepted once (TR_LATE if it is older than the newest seen),
+// a second copy is a duplicate (TR_DUP, dropped quietly), anything older is refused.
+enum TrackResult : uint8_t { TR_OK, TR_LATE, TR_SYNCED, TR_NEW_BOOT, TR_DUP, TR_REPLAY, TR_UNSYNCED, TR_OLD_BOOT };
+const uint8_t SEQ_WINDOW = 32;
 struct PeerTracker {
   bool     synced = false;
   bool     online = false;
   bool     sendHello = false;     // the sender has an out-of-date idea of OUR boot: send it a HELLO
   uint32_t bootId = 0, lastSeq = 0, lastHeard = 0;
+  uint32_t seen = 0;              // bit i set = packet (lastSeq - i) has arrived
 
   TrackResult accept(const LinkPacket& p) {
     TrackResult r;
@@ -293,16 +337,34 @@ struct PeerTracker {
       if (p.type != L_HELLO) return TR_UNSYNCED;                             // wait for its HELLO
       r = TR_SYNCED;
     }
-    else if (p.bootId != bootId || p.seq <= lastSeq)        return TR_REPLAY; // old or copied packet
-    else                                                    r = TR_OK;
-    bootId = p.bootId; lastSeq = p.seq; synced = true; lastHeard = millis();
+    else if (p.bootId != bootId) return TR_REPLAY;                           // from another boot
+    else if (p.seq > lastSeq) {                                              // the newest so far
+      uint32_t shift = p.seq - lastSeq;
+      seen = shift >= SEQ_WINDOW ? 1 : (seen << shift) | 1;
+      lastSeq = p.seq; lastHeard = millis();
+      return TR_OK;
+    }
+    else {                                                                   // older: once, if still in the window
+      uint32_t back = lastSeq - p.seq;
+      if (back >= SEQ_WINDOW) return TR_REPLAY;
+      if (seen & (1UL << back)) return TR_DUP;
+      seen |= 1UL << back; lastHeard = millis();
+      return TR_LATE;
+    }
+    bootId = p.bootId; lastSeq = p.seq; seen = 1; synced = true; lastHeard = millis();
     return r;
   }
 };
 
 inline char nodeLetter(uint8_t n) {
-  switch (n) { case NODE_MOD_A: return 'A'; case NODE_MOD_B: return 'B';
-               case NODE_GATEWAY: return 'G'; case NODE_SERVER: return 'P'; default: return '?'; }
+  switch (n) { case NODE_MOD_A: return 'A'; case NODE_MOD_B: return 'B'; case NODE_MOD_C: return 'C';
+               case NODE_MOD_D: return 'D'; case NODE_GATEWAY: return 'G'; case NODE_SERVER: return 'P';
+               default: return '?'; }
+}
+inline uint8_t nodeFromLetter(char c) {
+  switch (c) { case 'A': case 'a': return NODE_MOD_A; case 'B': case 'b': return NODE_MOD_B;
+               case 'C': case 'c': return NODE_MOD_C; case 'D': case 'd': return NODE_MOD_D;
+               case 'G': case 'g': return NODE_GATEWAY; default: return NODE_NONE; }
 }
 
 inline const char* roleName(uint8_t r) {
@@ -315,7 +377,7 @@ inline const char* cmdName(uint8_t c) {
     case CMD_MAINT_START: return "MAINT";   case CMD_MAINT_END: return "MAINT_END";
     case CMD_ACK_ALARM: return "ACK_ALARM"; case CMD_CLEAR_FAULT: return "CLEAR_FAULT";
     case CMD_SET_TIME: return "SET_TIME";   case CMD_RESEND_LOG: return "RESEND_LOG";
-    case CMD_LOGOUT: return "LOGOUT";
+    case CMD_LOGOUT: return "LOGOUT";       case CMD_TEST_CUT: return "TEST_CUT";
     default: return "UNKNOWN";
   }
 }
@@ -367,6 +429,155 @@ inline void startWatchdog(uint32_t timeoutMs) {
 // true while millis() has not yet reached t (safe across millis() overflow)
 inline bool notYet(uint32_t t) { return (int32_t)(t - millis()) > 0; }
 // ======== end of link_protocol.h ========
+// ======== mesh.h (inlined for Wokwi: no extra files needed) ========
+// =====================================================================
+//  mesh.h  —  the radio mesh (firmware 6.0). IDENTICAL in Gateway/ and SensorModule/.
+//
+//  Five radios: modules A, B, C, D and the gateway. Each one talks straight to
+//  the other four (a full mesh: 10 links, each with its own key).
+//
+//  Every packet carries the sender's "mesh" byte: which boards it hears
+//  directly right now. From that each board knows, for every link, whether it
+//  works BOTH ways. When the direct link to a board fails, packets for it also
+//  go through a third board (a relay) that hears both ends:
+//
+//      A --x-- C        A sends to C straight (in case it comes back) AND
+//       \     /         through G with via = G. G passes it on unchanged.
+//        \   /          C accepts whichever copy arrives first and drops the
+//          G            other (each sequence number is accepted once).
+//
+//  The relay can't read or fake what it carries: the packet is signed with the
+//  A<->C key, which G doesn't have, and the radio hops are encrypted per link
+//  (A->G with the A<->G key, G->C with the G<->C key). One hop only: a board
+//  only passes on packets that name it as `via` and come straight from the sender.
+// =====================================================================
+
+// The "mesh" byte: bit 0..3 = modules A..D, bit 4 = gateway.
+inline uint8_t meshBit(uint8_t node) {
+  return isModule(node) ? 1 << (node - 1) : node == NODE_GATEWAY ? 1 << 4 : 0;
+}
+const uint8_t MESH_SIZE = 5;
+const uint8_t MESH_ORDER[MESH_SIZE] = { NODE_MOD_A, NODE_MOD_B, NODE_MOD_C, NODE_MOD_D, NODE_GATEWAY };
+
+// One link: what this board knows about one other board.
+struct MeshPeer {
+  uint8_t        node;
+  const char*    name;
+  const uint8_t* mac;
+  const uint8_t* key;              // the signing key of this link
+  PeerTracker    trk;              // replay protection; trk.online = heard (any way) recently
+  bool           macSet = false;
+  bool           encrypted = false;
+  uint32_t       beats = 0;
+  uint32_t       lastKick = 0;     // last HELLO sent to nudge it after a restart
+  int8_t         rssi = 0;         // signal of its last packet that came straight from it
+  uint32_t       directAt = 0;     // when a good packet last came straight from it
+  uint8_t        theirMesh = 0;    // who IT hears directly (from its newest packet)
+  uint8_t        state = 0xFF;     // its state and priority (from its newest packet)
+  uint8_t        prio = 0;
+  uint8_t        route = 0;        // how our packets reach it: 0 = straight, else the relay's node
+  uint8_t        loggedRoute = 0;  // the route last written to the log
+  uint32_t       routeSince = 0;   // when the route last changed (logged once it has held 2 s)
+  uint32_t       cutUntil = 0;     // relay test: direct link treated as broken until then (0 = no test)
+  MeshPeer(uint8_t n, const char* nm, const uint8_t* m, const uint8_t* k) : node(n), name(nm), mac(m), key(k) {}
+};
+
+class Mesh {
+public:
+  Mesh(uint8_t me_, MeshPeer* const* peers_, uint8_t count_) : me(me_), peers(peers_), count(count_) {}
+
+  uint32_t directTimeout = 2500;   // no packet straight from a board for this long: direct link down
+  uint32_t forwarded = 0;          // packets passed on for other boards
+  uint32_t forwardDropped = 0;     // ... and refused by the rate limit
+
+  MeshPeer* find(uint8_t node) const {
+    for (uint8_t i = 0; i < count; i++) if (peers[i]->node == node) return peers[i];
+    return nullptr;
+  }
+  bool isCut(const MeshPeer& P) const { return P.cutUntil && notYet(P.cutUntil); }
+
+  // We hear P directly (and the link isn't cut for a test).
+  bool hears(const MeshPeer& P) const {
+    return !isCut(P) && P.directAt && millis() - P.directAt <= directTimeout;
+  }
+  // The direct link works both ways: we hear P, and P's newest packet says it hears us.
+  bool directOk(const MeshPeer& P) const { return hears(P) && (P.theirMesh & meshBit(me)); }
+
+  uint8_t mask() const {                                   // our "mesh" byte
+    uint8_t m = 0;
+    for (uint8_t i = 0; i < count; i++) if (hears(*peers[i])) m |= meshBit(peers[i]->node);
+    return m;
+  }
+
+  // Picks how packets for T travel. 0 = straight; else a board that we and T
+  // both reach directly. Keeps the current relay while it works, then prefers
+  // the gateway (in the middle of the site), then the strongest signal.
+  uint8_t chooseRoute(MeshPeer& T) {
+    if (directOk(T)) { T.route = 0; return 0; }
+    uint8_t best = 0;
+    int bestScore = -10000;
+    for (uint8_t i = 0; i < count; i++) {
+      MeshPeer& R = *peers[i];
+      if (&R == &T || !directOk(R) || !(R.theirMesh & meshBit(T.node))) continue;
+      int score = R.rssi ? R.rssi : -90;
+      if (R.node == T.route)      score += 15;
+      if (R.node == NODE_GATEWAY) score += 5;
+      if (score > bestScore) { bestScore = score; best = R.node; }
+    }
+    T.route = best;
+    return best;
+  }
+
+  // After a packet from P passed every check: remember what it tells us.
+  void heard(MeshPeer& P, const LinkPacket& p, TrackResult tr, int8_t rssi) {
+    if (p.via == 0) {                                      // came straight from P
+      P.directAt = millis() ? millis() : 1;
+      if (rssi) P.rssi = rssi;
+    }
+    if (tr != TR_LATE) { P.theirMesh = p.mesh; P.state = p.state; P.prio = p.priority; }
+  }
+
+  // A packet not addressed to us: should we pass it on, and to whom?
+  // Only when it names us as `via`, came straight from its sender (fromMac,
+  // real boards), and both ends are boards of this mesh. Rate-limited.
+  MeshPeer* forwardTo(const LinkPacket& p, const uint8_t* fromMac) {
+    if (p.via != me || p.dst == me || p.src == me || p.src == p.dst) return nullptr;
+    MeshPeer* S = find(p.src);
+    MeshPeer* D = find(p.dst);
+    if (!S || !D || isCut(*S) || isCut(*D)) return nullptr;
+    if (fromMac && S->macSet && memcmp(fromMac, S->mac, 6) != 0) return nullptr;
+    uint32_t now = millis(), el = now - tokenAt;           // token bucket: 40 packets, one more every 25 ms
+    if (el >= 1000)    { tokens = 40; tokenAt = now; }
+    else if (el >= 25) { tokens += el / 25; if (tokens > 40) tokens = 40; tokenAt += el / 25 * 25; }
+    if (tokens < 1) { forwardDropped++; return nullptr; }
+    tokens--;
+    forwarded++;
+    return D;
+  }
+
+  // One character per board, in the order A B C D G, for the status line:
+  //   '*' this board   'D' direct both ways   'a'..'d','g' relayed through that board
+  //   '?' heard, but no working route back yet   '-' not heard at all
+  char netChar(uint8_t node) const {
+    if (node == me) return '*';
+    const MeshPeer* P = find(node);
+    if (!P || !P->trk.online) return '-';
+    if (directOk(*P)) return 'D';
+    if (P->route) return (char)(nodeLetter(P->route) - 'A' + 'a');
+    return '?';
+  }
+  void netText(char out[MESH_SIZE + 1]) const {
+    for (uint8_t i = 0; i < MESH_SIZE; i++) out[i] = netChar(MESH_ORDER[i]);
+    out[MESH_SIZE] = 0;
+  }
+
+  const uint8_t me;
+private:
+  MeshPeer* const* peers;
+  const uint8_t count;
+  uint32_t tokens = 40, tokenAt = 0;    // relay rate limit
+};
+// ======== end of mesh.h ========
 struct CardUser { const char* name; uint8_t uid[10]; uint8_t uidLen; const char* pinHashHex; Role role; };
 struct PcUser   { const char* name; const char* pwHashHex; Role role; };
 // ======== secrets.h (inlined for Wokwi: no extra files needed) ========
@@ -377,20 +588,30 @@ struct PcUser   { const char* name; const char* pwHashHex; Role role; };
 // =====================================================================
 #include <Arduino.h>
 
-// ---------- Link keys (32 bytes each, one per radio link) ----------
-// KEY_A_GW / KEY_B_GW must be the SAME bytes as KEY_MOD_GW in each module's
-// secrets.h. KEY_GW_SERVER must be the same bytes as gateway_key in the
-// server's config (Server/config/p13server.toml) — Server/scripts/setup.sh
-// prints both forms for you.
-// Make new ones:  python3 -c "import os;print(', '.join('0x%02X'%b for b in os.urandom(32)))"
-static const uint8_t KEY_A_GW[32] = {   // Module A <-> Gateway
-  0x5B, 0x9F, 0x34, 0x83, 0xC7, 0x94, 0xF8, 0x33, 0xF0, 0xDA, 0x2E, 0xB7, 0x62, 0xAE, 0x36, 0x09,
-  0xA4, 0xCE, 0x88, 0x50, 0x45, 0xC4, 0x0F, 0xF0, 0xFC, 0xF2, 0x2E, 0x3C, 0x21, 0x5B, 0xE9, 0x41
-};
-static const uint8_t KEY_B_GW[32] = {   // Module B <-> Gateway
-  0xB2, 0x37, 0x39, 0x02, 0xB5, 0x83, 0x00, 0xCC, 0xFC, 0x53, 0x8E, 0x72, 0x5B, 0x02, 0x05, 0x7C,
-  0x18, 0xCB, 0xDD, 0x7F, 0x31, 0x83, 0x85, 0xE1, 0x3D, 0xB0, 0x9B, 0x38, 0x58, 0x40, 0x8E, 0xCE
-};
+// ---------- Link keys (32 bytes each, one per link) ----------
+// KEY_x_GW must be the SAME bytes as KEY_WITH_GW in module x's block of
+// SensorModule/secrets.h:  python3 Tools/make_keys.py  writes both files.
+// KEY_GW_SERVER must be the same bytes as gateway_key in the server's config
+// (Server/config/p13server.toml): Server/scripts/setup.py prints it for you.
+// >>> radio link keys (written by Tools/make_keys.py)
+// The same bytes as KEY_WITH_GW in each module's block of SensorModule/secrets.h.
+static const uint8_t KEY_A_GW[32] = {
+  0x9B, 0xE9, 0x67, 0x7F, 0x5F, 0x4D, 0xDE, 0xD6, 0x8A, 0x6E, 0x87, 0xB3, 0x1C, 0xEB, 0xC6, 0xD1,
+  0xB0, 0x54, 0xA3, 0x19, 0x08, 0xE6, 0xE9, 0xB6, 0x79, 0x43, 0x35, 0xCD, 0x3E, 0x3E, 0xEE, 0x43
+};   // Module A <-> Gateway
+static const uint8_t KEY_B_GW[32] = {
+  0x08, 0xBC, 0xE6, 0xCB, 0x4B, 0x89, 0x4F, 0x79, 0x14, 0x5D, 0x77, 0xC5, 0xE0, 0x78, 0xAB, 0xB5,
+  0xBB, 0xC2, 0xCF, 0xA8, 0x1E, 0xE8, 0x2D, 0xF1, 0x0E, 0x4F, 0xCC, 0x91, 0x67, 0xFB, 0xB1, 0xC0
+};   // Module B <-> Gateway
+static const uint8_t KEY_C_GW[32] = {
+  0x64, 0xE6, 0xEA, 0x84, 0x93, 0x2F, 0x74, 0xD2, 0x6C, 0x17, 0x17, 0x8F, 0x18, 0xCD, 0xFB, 0x40,
+  0x61, 0xD9, 0xCC, 0x9B, 0xE9, 0x8D, 0x4B, 0x6F, 0x72, 0x75, 0x14, 0x5B, 0xE3, 0x47, 0x98, 0xC1
+};   // Module C <-> Gateway
+static const uint8_t KEY_D_GW[32] = {
+  0xBF, 0xEB, 0x14, 0x5F, 0xC6, 0x6C, 0x77, 0x58, 0x1F, 0xD4, 0x39, 0xCC, 0x75, 0xB5, 0x6A, 0x41,
+  0x32, 0x18, 0x29, 0x76, 0xCC, 0x5E, 0xC4, 0x27, 0xC4, 0x14, 0x25, 0x9F, 0xDE, 0x83, 0xA8, 0x4C
+};   // Module D <-> Gateway
+// <<< radio link keys
 static const uint8_t KEY_GW_SERVER[32] = {  // Gateway <-> Server (dashboard)
   0xF2, 0x3E, 0xAB, 0xA5, 0x27, 0xC7, 0xE0, 0x35, 0xA8, 0x17, 0x8E, 0xC4, 0x27, 0xF5, 0x04, 0xD0,
   0x91, 0x60, 0x1A, 0xBA, 0xCC, 0x93, 0x9E, 0x6A, 0x71, 0x7D, 0x14, 0xE8, 0x8D, 0xAB, 0xB7, 0x1E
@@ -406,6 +627,8 @@ static const uint8_t ESPNOW_PMK[16] = {
 // that link still works and is signed, but NOT encrypted and the MAC isn't checked.
 static const uint8_t MAC_MOD_A[6]   = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
 static const uint8_t MAC_MOD_B[6]   = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+static const uint8_t MAC_MOD_C[6]   = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+static const uint8_t MAC_MOD_D[6]   = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
 static const uint8_t MAC_GATEWAY[6] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
 
 // ---------- Wi-Fi + server (the laptop that runs the dashboard) ----------
@@ -417,11 +640,11 @@ static const uint8_t MAC_GATEWAY[6] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
 #define SERVER_PORT    8883
 #define SERVER_NAME    "p13-server"      // name in the server's certificate (not a DNS name)
 #define MQTT_USER      "gateway"
-#define MQTT_PASSWORD  ""                // printed by Server/scripts/setup.sh
-#define SITE_ID        "site1"           // topics: p13/<SITE_ID>/to/G and p13/<SITE_ID>/to/P
+#define MQTT_PASSWORD  ""                // printed by Server/scripts/setup.py
+#define SITE_ID        "site1"           // up to 20 characters. Topics: p13/<SITE_ID>/to/G and /to/P
 
 // The CA certificate that signed the server's certificate (Server/certs/ca.crt,
-// printed by setup.sh). The gateway only talks to a server holding a
+// printed by setup.py). The gateway only talks to a server holding a
 // certificate from this CA. Empty = server link off (it never connects unchecked).
 static const char SERVER_CA_PEM[] = "";
 
@@ -687,26 +910,17 @@ struct RxItem { uint8_t src[6]; int8_t rssi; uint8_t via; int len; uint8_t data[
 QueueHandle_t rxQueue;
 const uint8_t BROADCAST[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
 
-struct PeerLink {
-  uint8_t        node;
-  const char*    name;
-  const uint8_t* mac;
-  const uint8_t* key;
-  PeerTracker    trk;
-  bool           macSet = false;
-  bool           encrypted = false;
-  uint32_t       beats = 0;
-  uint32_t       lastKick = 0;     // last HELLO sent to nudge a restarted module
-  int8_t         rssi = 0;         // signal of its last packet (radio links)
-  PeerLink(uint8_t n, const char* nm, const uint8_t* m, const uint8_t* k) : node(n), name(nm), mac(m), key(k) {}
-};
 const uint8_t NO_MAC[6] = { 0, 0, 0, 0, 0, 0 };
-PeerLink linkA (NODE_MOD_A,  "Module A", MAC_MOD_A, KEY_A_GW);
-PeerLink linkB (NODE_MOD_B,  "Module B", MAC_MOD_B, KEY_B_GW);
-PeerLink linkPc(NODE_SERVER, "Server",   NO_MAC,    KEY_GW_SERVER);   // over MQTT/TLS, not the radio
-PeerLink* const LINKS[3] = { &linkA, &linkB, &linkPc };
-PeerLink* linkFor(uint8_t node) {
-  for (PeerLink* L : LINKS) if (L->node == node) return L;
+MeshPeer linkA (NODE_MOD_A,  "Module A", MAC_MOD_A, KEY_A_GW);
+MeshPeer linkB (NODE_MOD_B,  "Module B", MAC_MOD_B, KEY_B_GW);
+MeshPeer linkC (NODE_MOD_C,  "Module C", MAC_MOD_C, KEY_C_GW);
+MeshPeer linkD (NODE_MOD_D,  "Module D", MAC_MOD_D, KEY_D_GW);
+MeshPeer linkPc(NODE_SERVER, "Server",   NO_MAC,    KEY_GW_SERVER);   // over MQTT/TLS, not the radio
+MeshPeer* const RADIO_PEERS[4] = { &linkA, &linkB, &linkC, &linkD };
+MeshPeer* const LINKS[5] = { &linkA, &linkB, &linkC, &linkD, &linkPc };
+Mesh mesh(NODE_GATEWAY, RADIO_PEERS, 4);
+MeshPeer* linkFor(uint8_t node) {
+  for (MeshPeer* L : LINKS) if (L->node == node) return L;
   return nullptr;
 }
 
@@ -737,9 +951,10 @@ struct LineWindow {
 
 // What the gateway knows about each sensor module
 struct ModuleView {
-  PeerLink* L;
+  MeshPeer* L;
   char      letter;
-  uint8_t   mask;            // 1 = A, 2 = B (for command targets)
+  uint8_t   idx;             // 0..3 = A..D
+  uint8_t   mask;            // 1 = A, 2 = B, 4 = C, 8 = D (for command targets)
   uint8_t   state = 0xFF;          // ModState from its last status
   uint8_t   prio = 0;
   String    status = "";
@@ -754,16 +969,27 @@ struct ModuleView {
   uint32_t  savedTop = 0, savedTopAt = 0, savedMiss = 0;
   bool      timeSent = false;
   uint32_t  lastTimeSync = 0;
-  ModuleView(PeerLink* l, char c, uint8_t b) : L(l), letter(c), mask(b) {}
+  ModuleView(MeshPeer* l, char c, uint8_t i) : L(l), letter(c), idx(i), mask(1 << i) {}
+  String key(const char* what) const { return String(what) + letter; }   // NVS key, e.g. "topC"
 };
-ModuleView modA(&linkA, 'A', 1);
-ModuleView modB(&linkB, 'B', 2);
-ModuleView* const MODS[2] = { &modA, &modB };
-ModuleView* modFor(uint8_t node) { return node == NODE_MOD_A ? &modA : node == NODE_MOD_B ? &modB : nullptr; }
+ModuleView modA(&linkA, 'A', 0);
+ModuleView modB(&linkB, 'B', 1);
+ModuleView modC(&linkC, 'C', 2);
+ModuleView modD(&linkD, 'D', 3);
+const uint8_t MOD_COUNT = 4;
+const uint8_t ALL_MODS = 0x0F;
+ModuleView* const MODS[MOD_COUNT] = { &modA, &modB, &modC, &modD };
+ModuleView* modFor(uint8_t node) { return isModule(node) ? MODS[node - NODE_MOD_A] : nullptr; }
 
 bool modOnline(const ModuleView& m) { return m.L->trk.online; }
 bool anyModIn(uint8_t s) { for (ModuleView* m : MODS) if (modOnline(*m) && m->state == s) return true; return false; }
-bool bothIn(uint8_t s)   { for (ModuleView* m : MODS) if (!modOnline(*m) || m->state != s) return false; return true; }
+bool allIn(uint8_t s)    { for (ModuleView* m : MODS) if (!modOnline(*m) || m->state != s) return false; return true; }
+String maskText(uint8_t mask) {                      // 0x0F -> "all", 0x05 -> "A+C"
+  if (mask == ALL_MODS) return "all";
+  String t = "";
+  for (ModuleView* m : MODS) if (mask & m->mask) { if (t.length()) t += "+"; t += m->letter; }
+  return t;
+}
 
 uint32_t myBoot = 0, mySeq = 0;
 uint8_t  myReset = 0;
@@ -773,7 +999,7 @@ bool macIsSet(const uint8_t* m) { for (int i = 0; i < 6; i++) if (m[i]) return t
 
 // A radio link is only used when it is encrypted, unless ALLOW_UNENCRYPTED (Wokwi has no
 // encryption). The server link is always inside TLS.
-bool linkUsable(const PeerLink& L) { return WOKWI_SIM || ALLOW_UNENCRYPTED || L.encrypted || &L == &linkPc; }
+bool linkUsable(const MeshPeer& L) { return WOKWI_SIM || ALLOW_UNENCRYPTED || L.encrypted || &L == &linkPc; }
 
 #if WOKWI_SIM
 #include <PubSubClient.h>
@@ -986,7 +1212,7 @@ void onRecv(const uint8_t* src, const uint8_t* data, int len) {
   xQueueSend(rxQueue, &it, 0);
 }
 
-bool addEncryptedPeer(PeerLink& L) {
+bool addEncryptedPeer(MeshPeer& L) {
   if (!L.macSet) return true;                  // no MAC yet: uses signed broadcast instead
   esp_now_peer_info_t pi = {};
   memcpy(pi.peer_addr, L.mac, 6);
@@ -1002,7 +1228,8 @@ void radioBegin() {
   myBoot  = makeBootId(bootNo, esp_random());   // boot counter + random: only ever goes up
   myReset = (uint8_t)esp_reset_reason();
   rxQueue = xQueueCreate(24, sizeof(RxItem));
-  for (PeerLink* L : LINKS) L->macSet = macIsSet(L->mac);
+  for (MeshPeer* L : LINKS) L->macSet = macIsSet(L->mac);
+  mesh.directTimeout = WOKWI_SIM ? 6000 : 2500;
 #if WOKWI_SIM
   WiFi.mode(WIFI_STA);
   WiFi.begin("Wokwi-GUEST", "", 6);
@@ -1023,8 +1250,7 @@ void radioBegin() {
   if (esp_now_init() != ESP_OK) { radioReady = false; return; }
   esp_now_register_recv_cb(onRecv);
   esp_now_set_pmk(ESPNOW_PMK);
-  addEncryptedPeer(linkA);                     // on failure that link uses signed broadcast
-  addEncryptedPeer(linkB);
+  for (MeshPeer* L : RADIO_PEERS) addEncryptedPeer(*L);   // on failure that link uses signed broadcast
   esp_now_peer_info_t bc = {};
   memcpy(bc.peer_addr, BROADCAST, 6);
   bc.channel = 0;
@@ -1035,11 +1261,23 @@ void radioBegin() {
 #endif
 }
 
-void linkSend(PeerLink& L, uint8_t type, uint8_t code, uint8_t role, uint8_t result,
+void rawSend(const MeshPeer& to, const LinkPacket& p) {      // one radio hop to a module
+#if WOKWI_SIM
+  if (mqtt.connected()) mqtt.publish(topicFor(to.node).c_str(), (const uint8_t*)&p, sizeof(p));
+#else
+  esp_now_send(to.encrypted ? to.mac : BROADCAST, (const uint8_t*)&p, sizeof(p));
+#endif
+}
+
+// To a module: straight, and also through a relay while the direct link doesn't
+// work both ways (same sequence number: the module keeps the first copy).
+// To the server: over MQTT/TLS.
+void linkSend(MeshPeer& L, uint8_t type, uint8_t code, uint8_t role, uint8_t result,
               uint32_t arg, uint32_t no, const char* text, uint32_t session, uint8_t target) {
   if (!radioReady || !linkUsable(L)) return;
   LinkPacket p = {};
   p.version = LINK_VERSION; p.src = NODE_GATEWAY; p.dst = L.node; p.type = type;
+  p.via = 0; p.mesh = mesh.mask();
   p.bootId = myBoot; p.seq = ++mySeq;
   p.dstBoot = L.trk.synced ? L.trk.bootId : 0;
   p.logNo = no; p.state = gwState; p.priority = systemPriority(); p.resetReason = myReset;
@@ -1048,13 +1286,25 @@ void linkSend(PeerLink& L, uint8_t type, uint8_t code, uint8_t role, uint8_t res
   if (n) memcpy(p.text, text, n);
   p.textLen = n;
   linkSign(L.key, 32, p, p.sig);
+  if (&L == &linkPc) {
 #if WOKWI_SIM
-  if (mqtt.connected()) mqtt.publish(topicFor(L.node).c_str(), (const uint8_t*)&p, sizeof(p));
+    if (mqtt.connected()) mqtt.publish(topicFor(L.node).c_str(), (const uint8_t*)&p, sizeof(p));
 #else
-  if (&L == &linkPc) serverSend(p);
-  else esp_now_send(L.encrypted ? L.mac : BROADCAST, (const uint8_t*)&p, sizeof(p));
+    serverSend(p);
 #endif
+    return;
+  }
+  uint8_t via = mesh.chooseRoute(L);
+  if (!mesh.isCut(L)) rawSend(L, p);
+  MeshPeer* R = via ? mesh.find(via) : nullptr;
+  if (R && linkUsable(*R)) {
+    p.via = via;
+    linkSign(L.key, 32, p, p.sig);             // still this link's key: the relay can't make or change it
+    rawSend(*R, p);
+  }
 }
+
+String nodeName(uint8_t node) { return node == NODE_GATEWAY ? String("Gateway") : String("Module ") + nodeLetter(node); }
 
 String textOf(const LinkPacket& p) {           // text[] is not NUL-terminated: copy by length
   char buf[LINK_TEXT_MAX + 1];
@@ -1183,8 +1433,9 @@ void pcResendStep() {                          // sends at most one line per cal
 
 // At boot: the last gw_no and the last line number of each module in the log
 // file, so numbering and "what we already have" carry on exactly.
-void scanLogTail(uint32_t& lastGw, uint32_t& lastA, uint32_t& lastB) {
-  lastGw = lastA = lastB = 0;
+void scanLogTail(uint32_t& lastGw, uint32_t* lastMod) {        // lastMod: one per module
+  lastGw = 0;
+  for (uint8_t i = 0; i < MOD_COUNT; i++) lastMod[i] = 0;
   const char* files[] = { "/log_old.csv", "/log.csv" };
   for (const char* name : files) {
     File f = LittleFS.open(name, FILE_READ);
@@ -1202,8 +1453,7 @@ void scanLogTail(uint32_t& lastGw, uint32_t& lastA, uint32_t& lastB) {
       if (c < 0 || c1 < 0 || c + 1 >= (int)line.length()) continue;
       uint32_t ln = (uint32_t)line.substring(c1 + 1).toInt();
       char mod = line[c + 1];
-      if (mod == 'A' && ln > lastA) lastA = ln;
-      if (mod == 'B' && ln > lastB) lastB = ln;
+      if (mod >= 'A' && mod <= 'D' && ln > lastMod[mod - 'A']) lastMod[mod - 'A'] = ln;
     }
     f.close();
   }
@@ -1212,11 +1462,11 @@ void scanLogTail(uint32_t& lastGw, uint32_t& lastA, uint32_t& lastB) {
 // =====================================================================
 //  LINES FROM THE MODULES (with recovery of lines lost on the radio)
 // =====================================================================
-void saveTop(ModuleView& m) { prefs.putUInt(m.letter == 'A' ? "topA" : "topB", m.top); m.savedTop = m.top; }
+void saveTop(ModuleView& m) { prefs.putUInt(m.key("top").c_str(), m.top); m.savedTop = m.top; }
 void saveMissing(ModuleView& m, uint32_t from) {          // where recovery stands, in case we restart
   if (from == m.savedMiss) return;
   m.savedMiss = from;
-  prefs.putUInt(m.letter == 'A' ? "missA" : "missB", from);
+  prefs.putUInt(m.key("miss").c_str(), from);
 }
 
 // First line number in [.., upTo] that we don't have (0 = none missing)
@@ -1276,10 +1526,10 @@ struct PendingCmd {
   uint32_t arg = 0, pcSeq = 0, deadline = 0;
   bool     fromPc = false;
   String   who = "";
-  uint8_t  res[2] = {};
-  String   why[2];
-  uint32_t firstSeq[2] = {}, lastSeq[2] = {}, nextTry[2] = {};
-  uint8_t  tries[2] = {};
+  uint8_t  res[MOD_COUNT] = {};
+  String   why[MOD_COUNT];
+  uint32_t firstSeq[MOD_COUNT] = {}, lastSeq[MOD_COUNT] = {}, nextTry[MOD_COUNT] = {};
+  uint8_t  tries[MOD_COUNT] = {};
 } pend;
 
 uint32_t cmdCounter = 0;
@@ -1309,6 +1559,7 @@ const char* cmdShort(uint8_t c) {               // short names for the 16-charac
     case CMD_ACK_ALARM: return "ACK";    case CMD_MAINT_START: return "MAINT";
     case CMD_MAINT_END: return "END";    case CMD_CLEAR_FAULT: return "CLEAR";
     case CMD_SET_TIME: return "TIME";    case CMD_RESEND_LOG: return "RESEND";
+    case CMD_TEST_CUT: return "CUT";
     default: return "CMD";
   }
 }
@@ -1328,7 +1579,7 @@ void report(bool fromPc, uint32_t pcSeq, uint8_t cmd, uint8_t res, const String&
 void finishPending(const String& extra) {
   String text = "";
   uint8_t overall = RES_OK;
-  for (uint8_t i = 0; i < 2; i++) {
+  for (uint8_t i = 0; i < MOD_COUNT; i++) {
     ModuleView& m = *MODS[i];
     if (!(pend.targets & m.mask)) continue;
     String r;
@@ -1357,7 +1608,7 @@ void finishPending(const String& extra) {
 void pendingStep() {
   if (!pend.active) return;
   uint32_t now = millis();
-  for (uint8_t i = 0; i < 2; i++) {
+  for (uint8_t i = 0; i < MOD_COUNT; i++) {
     ModuleView& m = *MODS[i];
     if (!(pend.targets & m.mask) || (pend.done & m.mask)) continue;
     if (!modOnline(m)) { pend.res[i] = RES_REFUSED; pend.why[i] = "offline"; pend.done |= m.mask; continue; }
@@ -1373,7 +1624,7 @@ void pendingStep() {
 }
 
 void onModuleCmdResult(ModuleView& m, const LinkPacket& p) {
-  uint8_t i = m.letter == 'A' ? 0 : 1;
+  uint8_t i = m.idx;
   uint32_t s = p.arg;
   if (!pendTargets(m) || (pend.done & m.mask) || p.code != pend.cmd) return;
   if (s < pend.firstSeq[i] || s > pend.lastSeq[i]) return;   // answer to something else
@@ -1385,7 +1636,7 @@ void onModuleCmdResult(ModuleView& m, const LinkPacket& p) {
 uint8_t roleNeeded(uint8_t cmd) {               // 0xFF = unknown command
   switch (cmd) {
     case CMD_ARM: case CMD_DISARM: case CMD_ACK_ALARM: case CMD_MAINT_END: return R_OPERATOR;
-    case CMD_MAINT_START: case CMD_CLEAR_FAULT:                            return R_MAINTENANCE;
+    case CMD_MAINT_START: case CMD_CLEAR_FAULT: case CMD_TEST_CUT:         return R_MAINTENANCE;
     case CMD_SET_TIME: case CMD_RESEND_LOG: case CMD_LOGOUT:               return R_NONE;
     default:                                                               return 0xFF;
   }
@@ -1430,6 +1681,17 @@ void runCommand(uint8_t cmd, uint8_t target, uint8_t role, const String& who, ui
                          fsOk ? "Resending" : "No log storage", 0, 0);
     return;
   }
+  if (cmd == CMD_TEST_CUT && (target == NODE_GATEWAY || (arg >> 16) == NODE_GATEWAY)) {
+    // a link of the gateway's own: cut (or restore) it here
+    uint8_t other = target == NODE_GATEWAY ? (uint8_t)(arg >> 16) : target;
+    MeshPeer* P = mesh.find(other);
+    uint32_t secs = min(arg & 0xFFFF, TEST_CUT_MAX_S);
+    if (!P) { report(fromPc, pcSeq, cmd, RES_BAD, "Not a module", who); return; }
+    P->cutUntil = secs ? (millis() + secs * 1000) | 1 : 0;
+    report(fromPc, pcSeq, cmd, RES_OK, secs ? "Direct link G-" + String(nodeLetter(other)) + " cut for " + String(secs) + " s (relay test)"
+                                            : "Relay test ended: G-" + String(nodeLetter(other)) + " direct again", who);
+    return;
+  }
   if (target == NODE_GATEWAY) {
     if (cmd == CMD_CLEAR_FAULT) clearGatewayTamper(who, fromPc, pcSeq);
     else report(fromPc, pcSeq, cmd, RES_BAD, "Not a gateway command", who);
@@ -1439,8 +1701,9 @@ void runCommand(uint8_t cmd, uint8_t target, uint8_t role, const String& who, ui
   // ---- sent to the modules ----
   if (gwState == GS_TAMPER) { report(fromPc, pcSeq, cmd, RES_REFUSED, "Gateway tamper: clear it first", who); return; }
   if (gwState == GS_BOOT)   { report(fromPc, pcSeq, cmd, RES_REFUSED, "Gateway starting", who); return; }
-  uint8_t targets = target == TARGET_BOTH ? 3 : target == NODE_MOD_A ? 1 : target == NODE_MOD_B ? 2 : 0;
+  uint8_t targets = target == TARGET_ALL ? ALL_MODS : isModule(target) ? modFor(target)->mask : 0;
   if (!targets) { report(fromPc, pcSeq, cmd, RES_BAD, "Unknown target", who); return; }
+  if (cmd == CMD_TEST_CUT && targets == ALL_MODS) { report(fromPc, pcSeq, cmd, RES_BAD, "Pick one link", who); return; }
   if (pend.active) {
     if (fromPc && !pend.fromPc && !pcWait.active) {          // dashboard goes next, right after the keypad command
       pcWait.active = true; pcWait.cmd = cmd; pcWait.target = target; pcWait.role = role;
@@ -1454,8 +1717,8 @@ void runCommand(uint8_t cmd, uint8_t target, uint8_t role, const String& who, ui
   pend.active = true; pend.id = ++cmdCounter; pend.cmd = cmd; pend.role = role; pend.arg = arg; pend.who = who;
   pend.fromPc = fromPc; pend.pcSeq = pcSeq; pend.targets = targets; pend.done = 0;
   pend.deadline = millis() + CMD_DEADLINE_MS;
-  for (uint8_t i = 0; i < 2; i++) { pend.res[i] = 0; pend.why[i] = ""; pend.tries[i] = 0; pend.nextTry[i] = 0; pend.firstSeq[i] = pend.lastSeq[i] = 0; }
-  logEvent("CMD", String(cmdName(cmd)) + " sent to " + (targets == 3 ? "A+B" : targets == 1 ? "A" : "B"), "-", "SENT", -1, who);
+  for (uint8_t i = 0; i < MOD_COUNT; i++) { pend.res[i] = 0; pend.why[i] = ""; pend.tries[i] = 0; pend.nextTry[i] = 0; pend.firstSeq[i] = pend.lastSeq[i] = 0; }
+  logEvent("CMD", String(cmdName(cmd)) + " sent to " + maskText(targets), "-", "SENT", -1, who);
   pendingStep();
 }
 
@@ -1588,13 +1851,14 @@ void checkSession() {
 // =====================================================================
 //  PACKETS IN
 // =====================================================================
-void onLinkUp(PeerLink& L) {
+void onLinkUp(MeshPeer& L) {
   ModuleView* m = modFor(L.node);
   if (m) { m->seenStatus = false; m->timeSent = false; }
 }
 
-void onLinkDown(PeerLink& L) {
+void onLinkDown(MeshPeer& L) {
   ModuleView* m = modFor(L.node);
+  L.loggedRoute = 0; L.routeSince = 0;
   if (m && m->top != m->savedTop) saveTop(*m);
   if (m && m->wasArmed) logEvent("COMM", String(L.name) + " LOST while armed (jammed or destroyed?)", "-", "-", 3);
   else                  logEvent("COMM", String(L.name) + " link DOWN");
@@ -1605,24 +1869,37 @@ void handlePacket(const RxItem& it) {
   LinkPacket p;
   memcpy(&p, it.data, sizeof(p));
   if (!linkWellFormed(p, it.len)) { reject(RJ_MALFORMED, "Malformed packet"); return; }     // T08
-  if (p.dst != NODE_GATEWAY) return;               // meant for another board (signed broadcast)
-  PeerLink* L = linkFor(p.src);
+  if (p.dst != NODE_GATEWAY) {                     // between two modules: pass it on if it asks us to relay
+#if !WOKWI_SIM
+    if (it.via != VIA_RADIO) return;               // never from the server
+#endif
+    MeshPeer* to = mesh.forwardTo(p, WOKWI_SIM ? nullptr : it.src);
+    if (to && linkUsable(*to)) rawSend(*to, p);    // unchanged: still signed by one module for the other
+    return;
+  }
+  MeshPeer* L = linkFor(p.src);
   if (!L) { reject(RJ_UNKNOWN, "Unknown sender"); return; }
-  if (!linkUsable(*L)) { reject(RJ_OTHER, String(L->name) + ": link not encrypted - set MACs"); return; }
+  MeshPeer* hop = L;                               // the board the radio frame came from
+  if (p.via) {
+    hop = mesh.find(p.via);
+    if (!hop || hop == L || L == &linkPc) { reject(RJ_OTHER, String(L->name) + ": bad relay"); return; }
+  }
+  if (L != &linkPc && mesh.isCut(*hop)) return;    // relay test: this direct link counts as broken
+  if (!linkUsable(*L) || !linkUsable(*hop)) { reject(RJ_OTHER, String(hop->name) + ": link not encrypted - set MACs"); return; }
 #if !WOKWI_SIM
   if ((L == &linkPc) != (it.via == VIA_MQTT)) { reject(RJ_OTHER, String(L->name) + ": arrived on the wrong link"); return; }
-  if (L->macSet && memcmp(it.src, L->mac, 6) != 0) { reject(RJ_MAC, String(L->name) + ": MAC not allowed"); return; }
+  if (hop->macSet && memcmp(it.src, hop->mac, 6) != 0) { reject(RJ_MAC, String(hop->name) + ": MAC not allowed"); return; }
 #endif
   uint8_t exp[SIG_LEN];
   linkSign(L->key, 32, p, exp);
   if (!sameBytes(exp, p.sig, SIG_LEN)) { reject(RJ_SIG, String(L->name) + ": bad signature (spoofed?)"); return; }
-  if (it.via == VIA_RADIO && it.rssi) L->rssi = it.rssi;
   if (p.dstBoot != myBoot) L->trk.sendHello = true;          // it doesn't know our current boot yet
   if (linkNeedsFreshness(p.type) && p.dstBoot != myBoot) {
     reject(RJ_STALE, String(L->name) + ": stale (made before our restart)"); return;
   }
   ModuleView* m = modFor(p.src);
   TrackResult tr = L->trk.accept(p);
+  if (tr == TR_DUP) return;                                  // the second copy (straight + relayed)
   if (tr == TR_UNSYNCED) {                                   // waiting for its HELLO: tell it who we are
     if (m) { L->trk.sendHello = false; linkSend(*L, L_HELLO, radioChannel(), 0, 0, unixNow(), 0, nullptr, 0, 0); }
     return;
@@ -1637,6 +1914,7 @@ void handlePacket(const RxItem& it) {
     reject(RJ_REPLAY, String(L->name) + ": replayed/old packet");
     return;
   }
+  if (m) mesh.heard(*L, p, tr, it.via == VIA_RADIO ? it.rssi : 0);
   if (tr == TR_NEW_BOOT) {
     logEvent("COMM", String(L->name) + " restarted (" + resetReasonName(p.resetReason) + ")");
     if (m) m->seenStatus = false;                           // re-check its log numbering
@@ -1644,13 +1922,14 @@ void handlePacket(const RxItem& it) {
   }
   if (!L->trk.online) {
     L->trk.online = true;
-    logEvent("COMM", String(L->name) + " link UP");
+    logEvent("COMM", String(L->name) + " link UP" + (p.via ? " (through " + nodeName(p.via) + ")" : String("")));
     onLinkUp(*L);
   }
 
   if (m) {
     switch (p.type) {
       case L_HELLO: case L_STATUS:
+        if (tr == TR_LATE) break;                   // an older beat that came round the long way
         onModuleStatus(*m, p);
         {
           bool hello = ++L->beats % 10 == 1 || L->trk.sendHello;
@@ -1660,6 +1939,7 @@ void handlePacket(const RxItem& it) {
         break;
       case L_LOG:        onModuleLog(*m, p); break;
       case L_CMD_RESULT: onModuleCmdResult(*m, p); break;
+      case L_PEER_EVENT: case L_PEER_ALARM: break;  // module to module (a broadcast copy): not for us
       default:           reject(RJ_OTHER, String(L->name) + ": unexpected packet type " + String(p.type)); break;
     }
   } else {                                         // the server
@@ -1681,7 +1961,7 @@ uint8_t radioChannel() {                         // told to the modules in every
 #endif
 }
 
-void checkLinkTimeout(PeerLink& L) {
+void checkLinkTimeout(MeshPeer& L) {
 #if WOKWI_SIM
   uint32_t limit = LINK_TIMEOUT_MS;
 #else
@@ -1709,8 +1989,26 @@ String gwStatusText() {
   s += String(",LOGNO:") + String(gwNo);
   s += String(",WIFI:") + (WiFi.status() == WL_CONNECTED ? String(WiFi.RSSI()) : String("-"));
   s += String(",CH:") + String(WiFi.channel());
+  char net[MESH_SIZE + 1];
+  mesh.netText(net);
+  s += String(",NET:") + net;
+  s += String(",FWD:") + String(mesh.forwarded);
+  String cut = "";
+  for (MeshPeer* P : RADIO_PEERS) if (mesh.isCut(*P)) cut += nodeLetter(P->node);
+  if (cut.length()) s += ",CUT:" + cut;
   s += String(",FW:") + FIRMWARE_VERSION;
   return s;
+}
+
+// A module link switched between direct and relayed: logged once it has held 2 s.
+void routeCheck(MeshPeer& L, uint32_t now) {
+  if (!L.trk.online || L.route == L.loggedRoute) { L.routeSince = 0; return; }
+  if (!L.routeSince) { L.routeSince = now; return; }
+  if (now - L.routeSince < 2000) return;
+  if (L.route) logEvent("COMM", String(L.name) + ": direct link lost, relayed through " + nodeName(L.route));
+  else         logEvent("COMM", String(L.name) + ": direct link back");
+  L.loggedRoute = L.route;
+  L.routeSince = 0;
 }
 
 void sendPcStatus(uint8_t about, const String& text) {
@@ -1769,11 +2067,14 @@ void linkLoop() {
 #endif
   RxItem it;
   while (xQueueReceive(rxQueue, &it, 0) == pdTRUE) handlePacket(it);
-  for (PeerLink* L : LINKS) checkLinkTimeout(*L);
+  for (MeshPeer* L : LINKS) checkLinkTimeout(*L);
+  for (MeshPeer* L : RADIO_PEERS)
+    if (L->cutUntil && !notYet(L->cutUntil)) { L->cutUntil = 0; logEvent("COMM", "Relay test over: direct link to " + String(L->name) + " back in use"); }
   pendingStep();
 
-  if (now - lastStatus >= STATUS_EVERY_MS) {        // 1 s: three status lines to the server
+  if (now - lastStatus >= STATUS_EVERY_MS) {        // 1 s: five status lines to the server
     lastStatus = now;
+    for (MeshPeer* L : RADIO_PEERS) { if (L->trk.online) mesh.chooseRoute(*L); routeCheck(*L, now); }
     sendPcStatus(NODE_GATEWAY, gwStatusText());
     for (ModuleView* m : MODS) {
       String st = m->status;
@@ -1815,9 +2116,10 @@ void updateOutputs() {
     uint8_t pr = systemPriority();
     if (pr == 3) r = fast; else if (pr == 2) r = true;
     bool attention = pr == 1 || anyModIn(MS_MAINTENANCE) || anyModIn(MS_RECOVERY) || anyModIn(MS_BOOT);
-    bool linkProblem = !modOnline(modA) || !modOnline(modB);
+    bool linkProblem = false;
+    for (ModuleView* m : MODS) if (!modOnline(*m)) linkProblem = true;
     if (attention) y = true; else if (linkProblem) y = slow;
-    if (pr < 2) g = bothIn(MS_ARMED) ? true : beat;  // steady = system armed, blinking = not
+    if (pr < 2) g = allIn(MS_ARMED) ? true : beat;   // steady = system armed, blinking = not
   }
   if (notYet(outputTestUntil)) g = r = y = true;
   digitalWrite(PIN_LED_GREEN, g);
@@ -1957,9 +2259,9 @@ void handleUi(char key) {
       Role   role = kpUser->role;
       String who  = String(kpUser->name) + "@GW";
       switch (key) {
-        case '1': kpLogout(); runCommand(CMD_ARM,       TARGET_BOTH, role, who, 0, false, 0); break;   // T01
-        case '2': kpLogout(); runCommand(CMD_DISARM,    TARGET_BOTH, role, who, 0, false, 0); break;
-        case '3': kpLogout(); runCommand(CMD_ACK_ALARM, TARGET_BOTH, role, who, 0, false, 0); break;
+        case '1': kpLogout(); runCommand(CMD_ARM,       TARGET_ALL, role, who, 0, false, 0); break;   // T01
+        case '2': kpLogout(); runCommand(CMD_DISARM,    TARGET_ALL, role, who, 0, false, 0); break;
+        case '3': kpLogout(); runCommand(CMD_ACK_ALARM, TARGET_ALL, role, who, 0, false, 0); break;
         case '4': case '5':
           if (role != R_MAINTENANCE) {
             logEvent("CMD", String(key == '4' ? "MAINT" : "CLEAR") + " denied: needs MAINTENANCE", "-", "DENIED", -1, who);
@@ -1981,9 +2283,8 @@ void handleUi(char key) {
       if (!key) return;
       kpUntil = millis() + MENU_TIMEOUT_MS;
       uint8_t t = 0xFF;
-      if (key == '1') t = NODE_MOD_A;
-      else if (key == '2') t = NODE_MOD_B;
-      else if (key == '3') t = TARGET_BOTH;
+      if (key >= '1' && key <= '4') t = NODE_MOD_A + (key - '1');
+      else if (key == '5') t = TARGET_ALL;
       else if (key == '0' && kpCmd == CMD_CLEAR_FAULT) t = NODE_GATEWAY;
       else if (key == '*') { kpLogout(); showMsg("Cancelled", ""); return; }
       if (t == 0xFF) { rejectInput("Not a target"); return; }
@@ -2027,10 +2328,16 @@ void renderLcd() {
     if (anyModIn(MS_INTRUSION))         l1 = "!! INTRUSION !!";
     else if (anyModIn(MS_TAMPER_FAULT)) l1 = "!! MOD TAMPER !!";
     else {
-      String mode = bothIn(MS_ARMED) ? "ARMED" : bothIn(MS_DISARMED) ? "DISARMED" : "MIXED";
+      String mode = allIn(MS_ARMED) ? "ARMED" : allIn(MS_DISARMED) ? "DISARMED" : "MIXED";
       l1 = "SYS " + mode + " P" + String(systemPriority());
     }
-    l2 = modCell(modA) + " " + modCell(modB) + " PC:" + (sess.active ? "L" : linkPc.trk.online ? "Y" : "N");
+    if ((millis() / 3000) % 2 == 0)                  // two pages: A B + server, C D + mesh
+      l2 = modCell(modA) + " " + modCell(modB) + " PC:" + (sess.active ? "L" : linkPc.trk.online ? "Y" : "N");
+    else {
+      uint8_t relayed = 0;
+      for (MeshPeer* L : RADIO_PEERS) if (L->trk.online && !mesh.directOk(*L)) relayed++;
+      l2 = modCell(modC) + " " + modCell(modD) + (relayed ? " R:" + String(relayed) : String(" M:OK"));
+    }
   }
   if (pend.active) { l1 = String("Sending ") + cmdShort(pend.cmd); l2 = "please wait"; }
   else if (kpStage == KP_MENU) {
@@ -2038,7 +2345,7 @@ void renderLcd() {
     l2 = kpUser && kpUser->role == R_MAINTENANCE ? "4Mnt 5Clr 6End" : "6EndMnt *=out";
   } else if (kpStage == KP_TARGET) {
     l1 = String(cmdShort(kpCmd)) + " on which?";
-    l2 = kpCmd == CMD_CLEAR_FAULT ? "1A 2B 3Both 0GW" : "1A 2B 3Both *";
+    l2 = kpCmd == CMD_CLEAR_FAULT ? "1-4=A-D 5All 0GW" : "1-4=A-D 5=All";
   } else if (auth.haveCard) {
     l1 = "Card read";
     l2 = "PIN: ";
@@ -2073,15 +2380,17 @@ void setup() {
   tamperReason = prefs.getString("reason", "");
 
   fsOk = LittleFS.begin(true);
-  uint32_t fileGw = 0, fileA = 0, fileB = 0;
-  if (fsOk) scanLogTail(fileGw, fileA, fileB);      // carry on exactly where the log file ends
+  uint32_t fileGw = 0, fileMod[MOD_COUNT] = {};
+  if (fsOk) scanLogTail(fileGw, fileMod);           // carry on exactly where the log file ends
   uint32_t savedGw = prefs.getUInt("logNo", 0);
   gwNo = fileGw ? max(fileGw, savedGw) : savedGw + 16;   // no file: skip ahead, never reuse a number
   prefs.putUInt("logNo", gwNo);
-  modA.top = max(fileA, (uint32_t)prefs.getUInt("topA", 0));
-  modB.top = max(fileB, (uint32_t)prefs.getUInt("topB", 0));
-  uint32_t missA = prefs.getUInt("missA", 0), missB = prefs.getUInt("missB", 0);
-  for (ModuleView* m : MODS) { m->win.reset(m->top + 1); m->checkedTop = m->top; m->savedTop = m->top; }
+  uint32_t misses[MOD_COUNT];
+  for (ModuleView* m : MODS) {
+    m->top = max(fileMod[m->idx], (uint32_t)prefs.getUInt(m->key("top").c_str(), 0));
+    misses[m->idx] = prefs.getUInt(m->key("miss").c_str(), 0);
+    m->win.reset(m->top + 1); m->checkedTop = m->top; m->savedTop = m->top;
+  }
   Wire.begin(PIN_SDA, PIN_SCL);
   display.begin();
   rfid.begin();
@@ -2101,8 +2410,8 @@ void setup() {
   WiFi.macAddress(own);
   if (macIsSet(MAC_GATEWAY) && memcmp(own, MAC_GATEWAY, 6) != 0)
     logEvent("SYSTEM", "MAC differs from MAC_GATEWAY in secrets.h", "-", "WARN");
-  for (PeerLink* L : LINKS) {
-    if (L == &linkPc || (linkUsable(*L) && L->encrypted)) continue;
+  for (MeshPeer* L : RADIO_PEERS) {
+    if (linkUsable(*L) && L->encrypted) continue;
     String why = L->macSet ? " encryption setup FAILED" : " MAC not set in secrets.h";
     if (ALLOW_UNENCRYPTED) logEvent("COMM", String(L->name) + why + ": signed, NOT encrypted", "-", "WARN");
     else                   logEvent("COMM", String(L->name) + why + ": link OFF", "-", "ERROR");
@@ -2111,8 +2420,7 @@ void setup() {
 #if ENROLL_MODE
   logEvent("SYSTEM", "ENROLL MODE ON - card UIDs printed. Set 0 for the demo", "-", "WARN");
 #endif
-  uint32_t misses[2] = { missA, missB };
-  for (uint8_t i = 0; i < 2; i++) {
+  for (uint8_t i = 0; i < MOD_COUNT; i++) {
     ModuleView& m = *MODS[i];
     m.savedMiss = misses[i];
     if (misses[i] && misses[i] <= m.top)                   // we restarted in the middle of fetching lines

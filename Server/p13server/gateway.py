@@ -3,8 +3,8 @@
 Speaks the same signed packets as the boards (see protocol.py), over whatever
 transport delivers them (MQTT in practice). It keeps the link alive with a beat
 every second, relays dashboard logins and commands, keeps the latest status of
-the gateway and both modules, and stores every event-log line, asking the
-gateway again for any it missed.
+the gateway and the four modules (including how each mesh link is doing), and
+stores every event-log line, asking the gateway again for any it missed.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from typing import Callable
 from . import __version__
 from .config import Config
 from .hub import Hub
-from .protocol import (GATEWAY_STATES, TARGET_BOTH, Cmd, Node, Packet, PacketError, PeerTracker, Result, Role,
+from .protocol import (GATEWAY_STATES, NODE_LETTERS, TARGET_ALL, Cmd, Node, Packet, PacketError, PeerTracker, Result, Role,
                        Track, Type, boot_is_newer, decode, login_response, make_boot_id, parse_status, verify)
 from .store import Store
 
@@ -37,7 +37,6 @@ GAP_GRACE = 2.0             # a line missing this long is asked for again
 RESEND_IDLE = 6.0           # a re-send with no new lines for this long is over
 RESEND_TRIES = 3
 USER_RE = re.compile(r"[A-Za-z0-9._-]{1,31}")
-NODE_LETTER = {Node.GATEWAY: "G", Node.MOD_A: "A", Node.MOD_B: "B"}
 
 
 @dataclass
@@ -83,7 +82,7 @@ class GatewayLink:
         self.online = False
         self.online_since: float | None = None
         self.last_heard = 0.0
-        self.nodes: dict[str, dict] = {"G": {}, "A": {}, "B": {}}
+        self.nodes: dict[str, dict] = {"G": {}, "A": {}, "B": {}, "C": {}, "D": {}}
         self.control: Control | None = None
         self.rejects: Counter[str] = Counter()
         self._reject_logged: dict[str, float] = {}
@@ -148,6 +147,9 @@ class GatewayLink:
                 self._reject("stale", "Stale answer (made before the server restarted)")
                 return
         result = self.tracker.accept(p)
+        if result == Track.DUP:                       # MQTT has no relays: a second copy is a replay
+            self._reject("replay", "Copy of a packet already received (replayed?)")
+            return
         if result == Track.UNSYNCED:
             return                                    # its HELLO follows within a second
         if result == Track.OLD_BOOT:
@@ -169,7 +171,8 @@ class GatewayLink:
             self._set_online(True)
 
         if p.type in (Type.HELLO, Type.STATUS):
-            self._on_status(p)
+            if result != Track.LATE:                  # an older status that arrived after a newer one
+                self._on_status(p)
         elif p.type == Type.LOG:
             self._on_log(p)
         elif p.type in (Type.LOGIN_CHAL, Type.LOGIN_RESULT):
@@ -190,7 +193,7 @@ class GatewayLink:
         return True
 
     def _on_status(self, p: Packet) -> None:
-        letter = NODE_LETTER.get(p.code)
+        letter = NODE_LETTERS.get(p.code)
         if not letter:
             return
         st = parse_status(p.text)
@@ -294,7 +297,7 @@ class GatewayLink:
             self.hub.publish("control", None)
 
     # ------------------------------------------------------------------ commands
-    async def command(self, cmd: int, target: int = TARGET_BOTH, arg: int = 0, session: int = 0) -> CommandOutcome:
+    async def command(self, cmd: int, target: int = TARGET_ALL, arg: int = 0, session: int = 0) -> CommandOutcome:
         if not self.online:
             return CommandOutcome("OFFLINE", "The gateway is offline")
         fut = asyncio.get_running_loop().create_future()
@@ -418,9 +421,10 @@ class GatewayLink:
 
 def command_from_name(name: str) -> int | None:
     return {"arm": Cmd.ARM, "disarm": Cmd.DISARM, "ack": Cmd.ACK_ALARM, "maint_start": Cmd.MAINT_START,
-            "maint_end": Cmd.MAINT_END, "clear": Cmd.CLEAR_FAULT}.get(name)
+            "maint_end": Cmd.MAINT_END, "clear": Cmd.CLEAR_FAULT, "test_cut": Cmd.TEST_CUT}.get(name)
 
 
 # Smallest role the gateway accepts for each command (Gateway.ino roleNeeded)
 ROLE_NEEDED = {Cmd.ARM: Role.OPERATOR, Cmd.DISARM: Role.OPERATOR, Cmd.ACK_ALARM: Role.OPERATOR,
-               Cmd.MAINT_END: Role.OPERATOR, Cmd.MAINT_START: Role.MAINTENANCE, Cmd.CLEAR_FAULT: Role.MAINTENANCE}
+               Cmd.MAINT_END: Role.OPERATOR, Cmd.MAINT_START: Role.MAINTENANCE, Cmd.CLEAR_FAULT: Role.MAINTENANCE,
+               Cmd.TEST_CUT: Role.MAINTENANCE}

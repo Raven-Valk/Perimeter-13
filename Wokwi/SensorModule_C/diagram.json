@@ -1,0 +1,218 @@
+{
+  "version": 1,
+  "author": "Pinnacle 1 Project 13",
+  "editor": "wokwi",
+  "dependencies": {},
+  "parts": [
+    {
+      "type": "board-esp32-devkit-c-v4",
+      "id": "esp",
+      "top": 0,
+      "left": 0,
+      "attrs": {}
+    },
+    {
+      "type": "wokwi-breadboard-half",
+      "id": "bb1",
+      "top": 420,
+      "left": -420,
+      "attrs": {}
+    },
+    {
+      "type": "wokwi-lcd1602",
+      "id": "lcd1",
+      "top": -230,
+      "left": -20,
+      "attrs": {
+        "pins": "i2c"
+      }
+    },
+    {
+      "type": "wokwi-membrane-keypad",
+      "id": "keypad1",
+      "top": -60,
+      "left": -520,
+      "attrs": {}
+    },
+    {
+      "type": "wokwi-pir-motion-sensor",
+      "id": "pirZ3",
+      "top": 290,
+      "left": -320,
+      "attrs": {
+        "delayTime": "3",
+        "retrigger": "0"
+      }
+    },
+    {
+      "type": "wokwi-led",
+      "id": "ledYellow",
+      "top": 150,
+      "left": 510,
+      "attrs": {
+        "color": "yellow"
+      }
+    },
+    {
+      "type": "wokwi-resistor",
+      "id": "rYellow",
+      "top": 110,
+      "left": 490,
+      "attrs": {
+        "value": "220"
+      }
+    }
+  ],
+  "connections": [
+    [
+      "esp:TX",
+      "$serialMonitor:RX",
+      "",
+      []
+    ],
+    [
+      "esp:RX",
+      "$serialMonitor:TX",
+      "",
+      []
+    ],
+    [
+      "esp:5V",
+      "bb1:tp.1",
+      "red",
+      []
+    ],
+    [
+      "esp:GND.1",
+      "bb1:tn.1",
+      "black",
+      []
+    ],
+    [
+      "esp:3V3",
+      "bb1:bp.1",
+      "orange",
+      []
+    ],
+    [
+      "esp:GND.2",
+      "bb1:bn.1",
+      "black",
+      []
+    ],
+    [
+      "bb1:tn.25",
+      "bb1:bn.25",
+      "black",
+      []
+    ],
+    [
+      "esp:21",
+      "lcd1:SDA",
+      "blue",
+      []
+    ],
+    [
+      "esp:22",
+      "lcd1:SCL",
+      "purple",
+      []
+    ],
+    [
+      "lcd1:VCC",
+      "bb1:tp.3",
+      "red",
+      []
+    ],
+    [
+      "lcd1:GND",
+      "bb1:tn.3",
+      "black",
+      []
+    ],
+    [
+      "esp:13",
+      "keypad1:R1",
+      "violet",
+      []
+    ],
+    [
+      "esp:14",
+      "keypad1:R2",
+      "violet",
+      []
+    ],
+    [
+      "esp:27",
+      "keypad1:R3",
+      "violet",
+      []
+    ],
+    [
+      "esp:26",
+      "keypad1:R4",
+      "violet",
+      []
+    ],
+    [
+      "esp:25",
+      "keypad1:C1",
+      "violet",
+      []
+    ],
+    [
+      "esp:33",
+      "keypad1:C2",
+      "violet",
+      []
+    ],
+    [
+      "esp:32",
+      "keypad1:C3",
+      "violet",
+      []
+    ],
+    [
+      "esp:4",
+      "keypad1:C4",
+      "violet",
+      []
+    ],
+    [
+      "esp:17",
+      "pirZ3:OUT",
+      "gold",
+      []
+    ],
+    [
+      "pirZ3:VCC",
+      "bb1:tp.5",
+      "red",
+      []
+    ],
+    [
+      "pirZ3:GND",
+      "bb1:tn.5",
+      "black",
+      []
+    ],
+    [
+      "esp:2",
+      "rYellow:1",
+      "gold",
+      []
+    ],
+    [
+      "rYellow:2",
+      "ledYellow:A",
+      "gold",
+      []
+    ],
+    [
+      "ledYellow:C",
+      "bb1:bn.11",
+      "black",
+      []
+    ]
+  ]
+}

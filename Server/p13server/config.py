@@ -10,7 +10,7 @@ SERVER_DIR = Path(__file__).resolve().parent.parent
 
 # The Wokwi projects publish to this public broker and topic base (link_protocol.h).
 WOKWI_BROKER = ("broker.hivemq.com", 1883)
-WOKWI_TOPIC_BASE = "pinnacle13/p13-2d386efc/v5"
+WOKWI_TOPIC_BASE = "pinnacle13/p13-2d386efc/v6"
 
 
 class ConfigError(ValueError):

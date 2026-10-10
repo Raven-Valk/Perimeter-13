@@ -8,6 +8,7 @@ The version numbers here are the final ones. During development some versions ha
 
 | Version | Date | What changed | Working name |
 |---|---|---|---|
+| [`v6`](#v6) | 2026-10-10 | four modules in a full mesh with relay, three walled zones, new dashboard | v6 |
 | [`v5`](#v5) | 2026-10-10 | gateway on Wi-Fi (MQTT over TLS) + server and dashboard website | v5.4 |
 | [`v4.3`](#v43) | 2026-10-09 | built-in pull-ups instead of resistors, new pin map, wiring diagrams | v5.3 |
 | [`v4.2`](#v42) | 2026-10-09 | gateway control box, PC login protocol, links off until MACs are set | v5.2 |
@@ -17,6 +18,48 @@ The version numbers here are the final ones. During development some versions ha
 | [`v3`](#v3) | 2026-10-06 | one controller board with both PIRs + listen-only gateway to the PC | Pinnacle13_Firmware_v4 (first) |
 | [`v2`](#v2) | 2026-10-06 | teammate's single-board draft (draft2.ino) | draft2.ino |
 | [`v1`](#v1) | 2026-10-05 | two-node firmware (main controller + sensor node over ESP-NOW) | Pinnacle13_Firmware |
+
+## v6
+
+*2026-10-10* · four modules in a full mesh with relay, three walled zones, new dashboard
+
+Four modules at the corners of a rectangle and the gateway in the middle, all in a full radio mesh (10 links) with automatic one-hop relay. Three protected walls, outside-facing PIRs, escalation during an alarm, and a redesigned dashboard.
+
+**Site and sensors**
+
+- Modules A, B, C, D at the corners. Zone 1 = wall A-D, zone 2 = wall A-B, zone 3 = wall B-C; wall C-D has no sensors.
+- Two PIRs per wall, mounted on the outside face looking along the wall, at low sensitivity and short range.
+- C and D are the low-cost modules: one PIR, LCD, keypad; tamper switch and LEDs optional, no buzzer.
+
+**Rules**
+
+- P2 within 20 s: both PIRs of a wall, both PIRs of corner A or B, or one PIR 3 times.
+- Buzzers by zone: zone 1 -> A, zone 2 -> A and B, zone 3 -> B.
+- Escalation: while an intrusion is unacknowledged, any single PIR is an intrusion at once.
+
+**Mesh (protocol v4)**
+
+- Full mesh of 5 radios, 10 links, each with its own key; each packet carries the sender's list of boards it hears.
+- When a link fails, packets go through one board that hears both ends: one hop, chosen in about 3 s, back to direct when the link returns.
+- End-to-end HMAC signatures, so a relay can't read, change or invent packets; a rate limit on forwarding.
+- 32-packet replay window, so a relayed copy and a direct copy are each accepted once; packets are 206 bytes.
+- Relay test command (TEST_CUT) cuts one link on purpose to show the relay working.
+
+**Gateway**
+
+- Commands to all four modules or one; keypad targets 1-4 = A-D, 5 = all; LCD pages for A/B and C/D + mesh; log recovery for four modules.
+
+**Dashboard**
+
+- Menu with Overview (site plan + control) and Log (events, units, link integrity) views.
+- Site plan with the PIR curtains, the 10 radio links and relay routes, and the buzzers.
+- Browser notifications for warnings and intrusions; a loud siren on intrusion until acknowledged or silenced.
+
+**Tests and tools**
+
+- 134 protocol, mesh/relay, log-recovery and interop checks; 18 server tests.
+- make_keys.py generates the 10 link keys; make_wokwi.py builds five Wokwi projects.
+- Wiring diagrams for the gateway, modules A/B and modules C/D.
 
 ## v5
 

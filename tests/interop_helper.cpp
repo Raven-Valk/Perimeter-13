@@ -1,6 +1,6 @@
 // Builds and checks packets with the firmware's own link_protocol.h, so the
 // server's Python version (Server/p13server/protocol.py) can be compared with it.
-//   interop_helper sign   <keyhex> <src> <dst> <type> <boot> <seq> <dstBoot> <logNo> <state> <prio>
+//   interop_helper sign   <keyhex> <src> <dst> <type> <via> <mesh> <boot> <seq> <dstBoot> <logNo> <state> <prio>
 //                         <reset> <code> <role> <result> <arg> <session> <target> <text>
 //   interop_helper verify <keyhex> <packethex>      -> fields, or BAD
 //   interop_helper login  <pwhashhex> <noncehex> <user>   -> the answer the gateway expects
@@ -23,16 +23,17 @@ static unsigned long num(const char* s) { return strtoul(s, nullptr, 0); }
 int main(int argc, char** argv) {
   if (argc < 2) return 2;
   std::string mode = argv[1];
-  if (mode == "sign" && argc == 20) {
+  if (mode == "sign" && argc == 22) {
     auto key = unhex(argv[2]);
     LinkPacket p = {};
     p.version = LINK_VERSION; p.src = num(argv[3]); p.dst = num(argv[4]); p.type = num(argv[5]);
-    p.bootId = num(argv[6]); p.seq = num(argv[7]); p.dstBoot = num(argv[8]); p.logNo = num(argv[9]);
-    p.state = num(argv[10]); p.priority = num(argv[11]); p.resetReason = num(argv[12]);
-    p.code = num(argv[13]); p.role = num(argv[14]); p.result = num(argv[15]);
-    p.arg = num(argv[16]); p.session = num(argv[17]); p.target = num(argv[18]);
-    size_t n = strnlen(argv[19], LINK_TEXT_MAX);
-    memcpy(p.text, argv[19], n); p.textLen = n;
+    p.via = num(argv[6]); p.mesh = num(argv[7]);
+    p.bootId = num(argv[8]); p.seq = num(argv[9]); p.dstBoot = num(argv[10]); p.logNo = num(argv[11]);
+    p.state = num(argv[12]); p.priority = num(argv[13]); p.resetReason = num(argv[14]);
+    p.code = num(argv[15]); p.role = num(argv[16]); p.result = num(argv[17]);
+    p.arg = num(argv[18]); p.session = num(argv[19]); p.target = num(argv[20]);
+    size_t n = strnlen(argv[21], LINK_TEXT_MAX);
+    memcpy(p.text, argv[21], n); p.textLen = n;
     linkSign(key.data(), key.size(), p, p.sig);
     const uint8_t* b = (const uint8_t*)&p;
     for (size_t i = 0; i < sizeof(p); i++) printf("%02x", b[i]);
@@ -49,8 +50,8 @@ int main(int argc, char** argv) {
     uint8_t exp[SIG_LEN];
     linkSign(key.data(), key.size(), p, exp);
     if (!sameBytes(exp, p.sig, SIG_LEN)) { printf("BAD sig\n"); return 0; }
-    printf("OK %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %.*s\n",
-           p.src, p.dst, p.type, p.bootId, p.seq, p.dstBoot, p.logNo, p.state, p.priority, p.resetReason,
+    printf("OK %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %.*s\n",
+           p.src, p.dst, p.type, p.via, p.mesh, p.bootId, p.seq, p.dstBoot, p.logNo, p.state, p.priority, p.resetReason,
            p.code, p.role, p.result, p.arg, p.session, p.target, p.textLen, (int)p.textLen, p.text);
     return 0;
   }

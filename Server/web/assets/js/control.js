@@ -1,12 +1,14 @@
 // The control panel: commands for the units, and taking control back.
 
-import { $, $$ } from "./dom.js";
+import { $, $$, h } from "./dom.js";
 import { api } from "./api.js";
-import { moduleState } from "./posture.js";
+import { moduleState, MODULES } from "./posture.js";
+import { linkName, PAIRS } from "./mesh.js";
 
-const VERB = { arm: "Arm", disarm: "Disarm", ack: "Acknowledge", maint_start: "Maintenance", maint_end: "End maintenance", clear: "Clear" };
+const VERB = { arm: "Arm", disarm: "Disarm", ack: "Acknowledge", maint_start: "Maintenance", maint_end: "End maintenance",
+               clear: "Clear", test_cut: "Relay test" };
 const DONE = { arm: "Armed", disarm: "Disarmed", ack: "Alarm acknowledged", maint_start: "Maintenance started",
-               maint_end: "Maintenance ended", clear: "Fault cleared" };
+               maint_end: "Maintenance ended", clear: "Fault cleared", test_cut: "Relay test" };
 const FAILED = { REFUSED: "refused", DENIED: "not allowed", BAD: "not understood", TIMEOUT: "got no answer", OFFLINE: "not sent" };
 
 let confirmTimer = null;
@@ -17,6 +19,7 @@ export function initControl(getState, onSession) {
     btn.addEventListener("click", () => press(btn));
   }
   $$('input[name="target"]').forEach((r) => r.addEventListener("change", () => renderControl(getState())));
+  $("#cut-link").replaceChildren(...PAIRS.map(([a, b]) => h("option", { value: `${a}-${b}` }, `Link ${linkName({ a, b })}`)));
 
   $("#take").addEventListener("submit", async (ev) => {
     ev.preventDefault();
@@ -46,12 +49,13 @@ export function initControl(getState, onSession) {
     const body = { command: cmd, target: target() };
     if (cmd === "maint_start") body.seconds = Number($("#maint-seconds").value);
     if (cmd === "clear") body.target = $("#clear-target").value;
+    if (cmd === "test_cut") { delete body.target; body.link = $("#cut-link").value; body.seconds = Number($("#cut-seconds").value); }
     const out = $("#result");
     say(out, `${VERB[cmd]}: sent, waiting for the units…`, "busy");
     $$("[data-command]").forEach((b) => (b.disabled = true));
     try {
       const r = await api("POST", "/api/commands", body);
-      const detail = (r.text || "").replace(/([AB]):/g, "$1: ").trim().replace(/ (?=[AB]: )/g, ", ");
+      const detail = (r.text || "").replace(/\b([A-D]):/g, "$1: ").trim().replace(/ (?=[A-D]: )/g, ", ");
       const head = r.result === "OK" ? DONE[cmd] : `${VERB[cmd]} ${FAILED[r.result] || r.result.toLowerCase()}`;
       say(out, `${head}${detail ? `. ${detail}` : ""}`, r.result === "OK" ? "ok" : "bad");
     } catch (err) {
@@ -62,7 +66,7 @@ export function initControl(getState, onSession) {
   }
 }
 
-const target = () => ($('input[name="target"]:checked') || {}).value || "both";
+const target = () => ($('input[name="target"]:checked') || {}).value || "all";
 
 function clearConfirm() {
   clearTimeout(confirmTimer);
@@ -97,7 +101,7 @@ export function renderControl(st) {
   }
 
   const t = target();
-  const keys = t === "both" ? ["A", "B"] : [t];
+  const keys = t === "all" ? MODULES : [t];
   const states = keys.map((k) => moduleState(st.nodes[k]));
   const any = (...wanted) => states.some((x) => wanted.includes(x) || x === "unknown");
   const set = (cmd, ok, why) => {
@@ -111,5 +115,6 @@ export function renderControl(st) {
   set("maint_end", any("MAINTENANCE"), "Not in maintenance");
   set("maint_start", maint, "Needs the maintenance role");
   set("clear", maint, "Needs the maintenance role");
+  set("test_cut", maint && gwUp, "Needs the maintenance role");
   $("#maint").classList.toggle("locked", !maint);
 }

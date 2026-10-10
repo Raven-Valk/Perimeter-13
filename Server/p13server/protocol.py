@@ -1,10 +1,13 @@
-"""The radio/server packet format, kept identical to firmware link_protocol.h (v3).
+"""The radio/server packet format, kept identical to firmware link_protocol.h (v4).
 
-Every packet is 204 bytes, little-endian, packed:
+Every packet is 206 bytes, little-endian, packed:
 
-    version  src  dst  type | bootId  seq  dstBoot  logNo | state  priority
+    version  src  dst  type  via  mesh | bootId  seq  dstBoot  logNo | state  priority
     resetReason  code  role  result | arg  session | target  textLen
     text[160] | sig[8]
+
+via: the board asked to pass the packet on (0 = sent straight). mesh: the boards
+the sender hears directly (bit 0..3 = modules A..D, bit 4 = gateway).
 
 sig is the first 8 bytes of HMAC-SHA256(link key, every byte before it).
 """
@@ -17,19 +20,21 @@ import struct
 from dataclasses import dataclass, field
 from enum import IntEnum
 
-LINK_VERSION = 3
+LINK_VERSION = 4
 SIG_LEN = 8
 TEXT_MAX = 160
 
-_LAYOUT = struct.Struct("<4B4I6B2I2B160s")   # everything the signature covers
+_LAYOUT = struct.Struct("<6B4I6B2I2B160s")   # everything the signature covers
 PACKET_LEN = _LAYOUT.size + SIG_LEN
-assert PACKET_LEN == 204
+assert PACKET_LEN == 206
 
 
 class Node(IntEnum):
     NONE = 0
     MOD_A = 1
     MOD_B = 2
+    MOD_C = 3
+    MOD_D = 4
     GATEWAY = 9
     SERVER = 10
 
@@ -63,6 +68,7 @@ class Cmd(IntEnum):
     SET_TIME = 7
     RESEND_LOG = 8
     LOGOUT = 9
+    TEST_CUT = 10      # relay test: arg = (other node << 16) | seconds
 
 
 class Result(IntEnum):
@@ -78,7 +84,23 @@ class Role(IntEnum):
     MAINTENANCE = 2
 
 
-TARGET_BOTH = 0
+TARGET_ALL = 0
+MODULES = "ABCD"
+NODE_LETTERS = {Node.MOD_A: "A", Node.MOD_B: "B", Node.MOD_C: "C", Node.MOD_D: "D", Node.GATEWAY: "G"}
+LETTER_NODES = {v: k for k, v in NODE_LETTERS.items()}
+MESH_ORDER = "ABCDG"          # the order of the NET:xxxxx status field
+
+# The site: zone n = a wall with a PIR at each end (firmware ZONE_END1/2)
+ZONES = {1: ("A", "D"), 2: ("A", "B"), 3: ("B", "C")}
+BUZZERS = ("A", "B")          # modules with a buzzer: they sound for alarms on their walls
+
+
+def zones_of(module: str) -> list[int]:
+    return [z for z, ends in ZONES.items() if module in ends]
+
+
+def mesh_bit(letter: str) -> int:
+    return 1 << MESH_ORDER.index(letter)
 
 # Module states as sent in LinkPacket.state (firmware ModState)
 MODULE_STATES = ("BOOT", "DISARMED", "ARMED", "INTRUSION", "TAMPER_FAULT", "MAINTENANCE", "RECOVERY")
@@ -90,6 +112,8 @@ class Packet:
     src: int
     dst: int
     type: int
+    via: int = 0
+    mesh: int = 0
     boot_id: int = 0
     seq: int = 0
     dst_boot: int = 0
@@ -109,7 +133,7 @@ class Packet:
     def _body(self) -> bytes:
         raw = self.text.encode("utf-8", "replace")[:TEXT_MAX]
         return _LAYOUT.pack(
-            LINK_VERSION, self.src, self.dst, self.type,
+            LINK_VERSION, self.src, self.dst, self.type, self.via, self.mesh,
             self.boot_id, self.seq, self.dst_boot, self.log_no,
             self.state, self.priority, self.reset_reason, self.code, self.role, self.result,
             self.arg, self.session,
@@ -135,7 +159,7 @@ def decode(data: bytes) -> tuple[Packet, bytes]:
     if len(data) != PACKET_LEN:
         raise PacketError(f"length {len(data)}, expected {PACKET_LEN}")
     body, sig = data[:-SIG_LEN], data[-SIG_LEN:]
-    (version, src, dst, ptype, boot_id, seq, dst_boot, log_no, state, priority, reset_reason,
+    (version, src, dst, ptype, via, mesh, boot_id, seq, dst_boot, log_no, state, priority, reset_reason,
      code, role, result, arg, session, target, text_len, raw) = _LAYOUT.unpack(body)
     if version != LINK_VERSION:
         raise PacketError(f"version {version}")
@@ -143,7 +167,7 @@ def decode(data: bytes) -> tuple[Packet, bytes]:
         raise PacketError(f"type {ptype}")
     if text_len > TEXT_MAX:
         raise PacketError(f"text length {text_len}")
-    pkt = Packet(src, dst, ptype, boot_id, seq, dst_boot, log_no, state, priority, reset_reason,
+    pkt = Packet(src, dst, ptype, via, mesh, boot_id, seq, dst_boot, log_no, state, priority, reset_reason,
                  code, role, result, arg, session, target,
                  raw[:text_len].decode("utf-8", "replace"), sig)
     return pkt, body
@@ -172,21 +196,28 @@ def boot_is_newer(a: int, b: int, simulator: bool = False) -> bool:
 
 class Track(IntEnum):
     OK = 0
-    SYNCED = 1
-    NEW_BOOT = 2
-    REPLAY = 3
-    UNSYNCED = 4
-    OLD_BOOT = 5
+    LATE = 1          # older than the newest, inside the window, first time: accepted
+    SYNCED = 2
+    NEW_BOOT = 3
+    DUP = 4           # second copy (straight + relayed): dropped
+    REPLAY = 5
+    UNSYNCED = 6
+    OLD_BOOT = 7
+
+
+SEQ_WINDOW = 32
 
 
 class PeerTracker:
-    """One sender's boot ID and sequence number (firmware PeerTracker)."""
+    """One sender's boot ID and sequence numbers (firmware PeerTracker): the
+    last 32 sequence numbers are remembered, each is accepted once."""
 
     def __init__(self, simulator: bool = False):
         self.simulator = simulator
         self.synced = False
         self.boot_id = 0
         self.last_seq = 0
+        self.seen = 0
         self.send_hello = False
 
     def accept(self, p: Packet) -> Track:
@@ -198,11 +229,22 @@ class PeerTracker:
             if p.type != Type.HELLO:
                 return Track.UNSYNCED
             result = Track.SYNCED
-        elif p.boot_id != self.boot_id or p.seq <= self.last_seq:
+        elif p.boot_id != self.boot_id:
             return Track.REPLAY
+        elif p.seq > self.last_seq:
+            shift = p.seq - self.last_seq
+            self.seen = 1 if shift >= SEQ_WINDOW else ((self.seen << shift) | 1) & 0xFFFFFFFF
+            self.last_seq = p.seq
+            return Track.OK
         else:
-            result = Track.OK
-        self.boot_id, self.last_seq, self.synced = p.boot_id, p.seq, True
+            back = self.last_seq - p.seq
+            if back >= SEQ_WINDOW:
+                return Track.REPLAY
+            if self.seen & (1 << back):
+                return Track.DUP
+            self.seen |= 1 << back
+            return Track.LATE
+        self.boot_id, self.last_seq, self.seen, self.synced = p.boot_id, p.seq, 1, True
         return result
 
 
@@ -217,7 +259,7 @@ def login_response(pw_hash: bytes, nonce: bytes, user: str) -> str:
 
 
 def parse_status(text: str) -> dict[str, str]:
-    """'A,ARMED,P0,WALL:OK,...' -> {'node': 'A', 'state': 'ARMED', 'priority': '0', 'WALL': 'OK', ...}"""
+    """'A,ARMED,P0,Z2:OK,...' -> {'node': 'A', 'state': 'ARMED', 'priority': '0', 'Z2': 'OK', ...}"""
     parts = text.split(",")
     out: dict[str, str] = {}
     if parts and parts[0]:
@@ -235,6 +277,21 @@ def parse_status(text: str) -> dict[str, str]:
 
 LOG_FIELDS = ("log_no", "boot", "uptime_ms", "unix_time", "module", "priority",
               "state", "type", "event", "zone", "user", "result")
+
+
+def parse_net(text: str) -> dict[str, str]:
+    """NET field 'xxxxx' (order A B C D G) -> {'B': 'D', 'C': 'g', ...} (self left out).
+    'D' = direct both ways, a..d/g = relayed through that board, '?' = no route yet, '-' = not heard."""
+    out: dict[str, str] = {}
+    for letter, ch in zip(MESH_ORDER, text):
+        if ch != "*":
+            out[letter] = ch
+    return out
+
+
+def zone_digits(text: str) -> list[int]:
+    """'1+3' or '13' -> [1, 3]; '-' -> []."""
+    return sorted({int(c) for c in text if c.isdigit() and 1 <= int(c) <= 3})
 
 
 def parse_log_line(line: str) -> dict[str, str] | None:

@@ -1,13 +1,23 @@
-// Link integrity: how the server reaches the gateway, refused packets, and the
-// server's own audit trail (sign-ins, commands, link changes).
+// Link integrity: the ten radio links of the mesh, how the server reaches the
+// gateway, refused packets, and the server's own audit trail.
 
 import { $, h, when } from "./dom.js";
+import { linkName, meshLinks, NAME } from "./mesh.js";
+
+const PATH = { direct: "Direct", relayed: "Relayed", partial: "One way", down: "No link", unknown: "—" };
+const PATH_TONE = { direct: "good", relayed: "warn", partial: "warn", down: "bad", unknown: "dim" };
 
 const REJECT_NAMES = { signature: "Bad signature", replay: "Replayed", stale: "Stale", malformed: "Malformed",
                        sender: "Unknown sender", type: "Unexpected type" };
 
 export function renderIntegrity(st) {
   const l = st.link || {};
+  const links = meshLinks(st.nodes, !!l.gateway);
+  $("#mesh-table tbody").replaceChildren(...links.map((m) =>
+    h("tr", { "data-state": m.state },
+      h("th", { scope: "row" }, linkName(m)),
+      h("td", { class: PATH_TONE[m.state] }, PATH[m.state]),
+      h("td", { class: "note" }, m.via ? `through ${m.via === "G" ? "gateway" : NAME[m.via]}${m.test ? ", test" : ""}` : m.test ? "test" : ""))));
   const transport = { hardware: "MQTT over TLS from the gateway, signed packets",
                       wokwi: "Public MQTT broker (Wokwi): signed, not encrypted",
                       emulator: "Emulated gateway in the server process" }[l.mode] || "—";

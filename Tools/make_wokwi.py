@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Builds the single-file Wokwi sketches from the real firmware.
 
-Wokwi projects are easiest as one sketch.ino, so link_protocol.h and secrets.h
-are pasted into it, and the simulator switches are turned on. Run this after
+Wokwi projects are easiest as one sketch.ino, so link_protocol.h, mesh.h and
+secrets.h are pasted into it, and the simulator switches are turned on. One
+sketch per board: Gateway, SensorModule_A .. SensorModule_D. Run this after
 changing the firmware:
 
-  python3 Tools/make_wokwi.py            (writes ../Pinnacle13_v5.4_Wokwi/*/sketch.ino)
+  python3 Tools/make_wokwi.py            (writes ../Pinnacle13_v6_Wokwi/*/sketch.ino)
 """
 
 import re
@@ -17,9 +18,10 @@ OUT = ROOT.parent / f"{ROOT.name}_Wokwi"
 
 
 def inline(sketch: str, folder: Path) -> str:
-    for name in ("link_protocol.h", "secrets.h"):
+    for name in ("link_protocol.h", "mesh.h", "secrets.h"):
         body = (folder / name).read_text()
-        body = "\n".join(l for l in body.splitlines() if l.strip() != "#pragma once")
+        body = "\n".join(l for l in body.splitlines()
+                         if l.strip() != "#pragma once" and l.strip() != '#include "link_protocol.h"')
         block = (f"// ======== {name} (inlined for Wokwi: no extra files needed) ========\n"
                  f"{body}\n// ======== end of {name} ========")
         sketch, n = re.subn(rf'^#include "{re.escape(name)}"$', lambda _: block, sketch, count=1, flags=re.M)
@@ -35,13 +37,16 @@ def switch(sketch: str, name: str, value: str) -> str:
     return sketch
 
 
-for board, file, switches in (("Gateway", "Gateway.ino", {"WOKWI_SIM": "1"}),
-                              ("SensorModule", "SensorModule.ino", {"WOKWI_SIM": "1", "BENCH_COMMANDS": "1"})):
+BOARDS = [("Gateway", "Gateway", "Gateway.ino", {"WOKWI_SIM": "1"})]
+BOARDS += [(f"SensorModule_{m}", "SensorModule", "SensorModule.ino",
+            {"MODULE_ID": f"'{m}'", "WOKWI_SIM": "1", "BENCH_COMMANDS": "1"}) for m in "ABCD"]
+
+for out_name, board, file, switches in BOARDS:
     src = ROOT / board
     sketch = (src / file).read_text()
     for k, v in switches.items():
         sketch = switch(sketch, k, v)
-    out = OUT / board / "sketch.ino"
+    out = OUT / out_name / "sketch.ino"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(inline(sketch, src))
     print(f"wrote {out.relative_to(ROOT.parent)}")

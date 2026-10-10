@@ -11,9 +11,13 @@
 <link rel="stylesheet" href="/assets/css/app.css">
 <script type="module" src="/assets/js/main.js"></script>
 </head>
-<body>
+<body data-view="overview">
 
 <header class="bar">
+  <button class="menu-button" id="menu-button" type="button" aria-label="Menu" aria-controls="drawer" aria-expanded="false">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M3 12h18M3 18h18" /></svg>
+    <span class="menu-dot" id="menu-dot" hidden></span>
+  </button>
   <a class="brand" href="/" aria-label="Perimeter 13, home">
     <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
       <path d="M5 26V8M27 26V8" />
@@ -23,32 +27,104 @@
     </svg>
     <span class="brand-name">Perimeter 13</span>
   </a>
-  <span class="site" id="site"></span>
+  <span class="view-name" id="view-name">Overview</span>
   <div class="bar-right">
+    <span class="site" id="site"></span>
     <span class="feed" id="feed" data-state="connecting">Connecting</span>
     <time class="clock" id="clock"></time>
-    <div class="who" id="who" hidden>
-      <span class="who-name" id="who-name"></span>
-      <button class="link-button" id="sign-out" type="button">Sign out</button>
-    </div>
   </div>
 </header>
 
+<div class="siren-bar" id="siren-bar" role="alert" hidden>
+  <span class="siren-icon" aria-hidden="true"></span>
+  <span class="siren-text" id="siren-text">Siren sounding</span>
+  <button class="siren-silence" id="siren-silence" type="button">Silence</button>
+</div>
+
+<!-- The menu: views, alert settings, the account. Opens over the page, like a side drawer. -->
+<div class="scrim" id="scrim" hidden></div>
+<nav class="drawer" id="drawer" aria-label="Menu" aria-hidden="true" inert>
+  <div class="drawer-head">
+    <button class="menu-button" id="menu-close" type="button" aria-label="Close menu">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M3 12h18M3 18h18" /></svg>
+    </button>
+    <span class="brand-name">Perimeter 13</span>
+  </div>
+
+  <ul class="nav" role="list">
+    <li><button class="nav-item" type="button" data-view="overview" aria-current="page">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="14" /><circle cx="4" cy="5" r="1.6" /><circle cx="20" cy="5" r="1.6" /><circle cx="20" cy="19" r="1.6" /><circle cx="4" cy="19" r="1.6" /><circle cx="12" cy="12" r="1.6" /></svg>
+      <span>Overview</span><span class="nav-sub">Plan and control</span>
+    </button></li>
+    <li><button class="nav-item" type="button" data-view="log">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6h12M8 12h12M8 18h12" /><path d="M4 6h1M4 12h1M4 18h1" /></svg>
+      <span>Log</span><span class="nav-sub">Events, units, links</span>
+      <span class="nav-badge" id="log-badge" hidden>Alarm</span>
+    </button></li>
+  </ul>
+
+  <section class="drawer-section" aria-labelledby="alerts-title">
+    <h2 id="alerts-title">Alerts on this device</h2>
+    <div class="setting">
+      <div class="setting-text">
+        <span class="setting-name">Notifications</span>
+        <span class="setting-note" id="notify-note">Off</span>
+      </div>
+      <button class="switch" id="notify-switch" type="button" role="switch" aria-checked="false" aria-label="Notifications"></button>
+    </div>
+    <div class="setting">
+      <div class="setting-text">
+        <span class="setting-name">Warnings too</span>
+        <span class="setting-note">One sensor fired, not confirmed</span>
+      </div>
+      <button class="switch" id="warn-switch" type="button" role="switch" aria-checked="true" aria-label="Notify for warnings"></button>
+    </div>
+    <div class="setting">
+      <div class="setting-text">
+        <span class="setting-name">Siren on intrusion</span>
+        <span class="setting-note" id="siren-note">Loud, until acknowledged or silenced</span>
+      </div>
+      <button class="switch" id="siren-switch" type="button" role="switch" aria-checked="true" aria-label="Siren on intrusion"></button>
+    </div>
+    <div class="setting volume">
+      <label for="volume" class="setting-name">Volume</label>
+      <input type="range" id="volume" min="0" max="100" step="5" value="80">
+      <button class="link-button" id="siren-test" type="button">Test</button>
+    </div>
+  </section>
+
+  <section class="drawer-section" aria-labelledby="account-title">
+    <h2 id="account-title">Account</h2>
+    <p class="drawer-who" id="drawer-who"></p>
+    <button class="nav-item" type="button" id="sign-out">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 4h6v16h-6" /><path d="M10 8l-4 4 4 4M6 12h10" /></svg>
+      <span>Sign out</span>
+    </button>
+  </section>
+
+  <p class="drawer-foot" id="drawer-foot"></p>
+</nav>
+
 <p class="notice" id="notice" hidden></p>
+<div class="toasts" id="toasts" aria-live="polite"></div>
 
 <main class="console" id="console" hidden>
   <section class="situation" aria-labelledby="statement">
-    <h1 class="statement" id="statement" data-level="quiet">Connecting to the server</h1>
+    <h1 class="statement" id="statement" data-level="quiet" tabindex="-1">Connecting to the server</h1>
     <p class="statement-detail" id="statement-detail"></p>
   </section>
 
-  <section class="sheet" aria-label="Plan view of the protected wall">
+  <!-- ================= Overview: the plan and the controls ================= -->
+  <section class="sheet only-overview" aria-label="Plan view of the site">
     <div class="sheet-scroll">
-    <svg class="plan" id="plan" viewBox="0 0 1000 560" role="img" aria-labelledby="plan-title">
-      <title id="plan-title">Plan view: the protected wall with Module A and Module B at its ends, their sensor coverage, and the gateway</title>
+    <svg class="plan" id="plan" viewBox="0 0 1000 660" role="img" aria-labelledby="plan-title">
+      <title id="plan-title">Plan of the site: four modules at the corners, the gateway in the middle, PIR curtains on the outside of walls A-D, A-B and B-C, and the ten radio links of the mesh</title>
       <defs>
         <pattern id="poche" width="7" height="7" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
           <line x1="0" y1="0" x2="0" y2="7" class="poche-line" />
+        </pattern>
+        <pattern id="poche-light" width="7" height="7" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+          <line x1="0" y1="0" x2="0" y2="7" class="poche-line light" />
         </pattern>
         <pattern id="hatch-warn" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(-45)">
           <line x1="0" y1="0" x2="0" y2="6" class="hatch-warn-line" />
@@ -61,69 +137,106 @@
         </marker>
       </defs>
 
-      <rect class="frame" x="8" y="8" width="984" height="544" />
+      <rect class="frame" x="8" y="8" width="984" height="644" />
+      <text class="orient" x="30" y="40">Outside</text>
+      <text class="orient middle" x="500" y="420">Inside</text>
 
-      <text class="orient" x="102" y="44">Outside</text>
-      <text class="orient middle" x="500" y="292">Inside</text>
-
+      <!-- zone dimensions, outside each protected wall -->
       <g class="dimension">
-        <line x1="120" y1="78" x2="880" y2="78" marker-start="url(#tick)" marker-end="url(#tick)" />
-        <line x1="120" y1="70" x2="120" y2="104" class="ext" />
-        <line x1="880" y1="70" x2="880" y2="104" class="ext" />
-        <rect x="440" y="68" width="120" height="20" class="dim-gap" />
-        <text x="500" y="83">protected wall</text>
+        <line x1="152" y1="46" x2="848" y2="46" marker-start="url(#tick)" marker-end="url(#tick)" />
+        <rect x="400" y="36" width="200" height="20" class="dim-gap" />
+        <text x="500" y="51" id="dim-z2">Zone 2 · wall A–B</text>
       </g>
+      <g class="dimension">
+        <line x1="62" y1="112" x2="62" y2="518" marker-start="url(#tick)" marker-end="url(#tick)" />
+        <rect x="52" y="235" width="20" height="160" class="dim-gap" />
+        <text transform="translate(67 315) rotate(-90)" id="dim-z1">Zone 1 · wall A–D</text>
+      </g>
+      <g class="dimension">
+        <line x1="938" y1="112" x2="938" y2="518" marker-start="url(#tick)" marker-end="url(#tick)" />
+        <rect x="928" y="235" width="20" height="160" class="dim-gap" />
+        <text transform="translate(933 315) rotate(90)" id="dim-z3">Zone 3 · wall B–C</text>
+      </g>
+      <text class="orient middle" x="500" y="548">Wall C–D · no sensors</text>
 
+      <!-- PIR curtains: on the OUTSIDE face of each wall, looking along it -->
       <g class="fans">
-        <path id="fan-A-WALL" class="fan" d="M182 146 L846 130 L846 200 Z" />
-        <path id="fan-B-WALL" class="fan" d="M818 146 L154 130 L154 200 Z" />
-        <path id="fan-A-SIDE" class="fan" d="M158 168 L140 432 L238 432 Z" />
-        <path id="fan-B-SIDE" class="fan" d="M842 168 L860 432 L762 432 Z" />
+        <path id="fan-A-Z2" class="fan" d="M178 104 L812 80 L812 108 Z" />
+        <path id="fan-B-Z2" class="fan" d="M822 104 L188 80 L188 108 Z" />
+        <path id="fan-A-Z1" class="fan" d="M144 122 L120 494 L148 494 Z" />
+        <path id="fan-D-Z1" class="fan" d="M144 508 L120 136 L148 136 Z" />
+        <path id="fan-B-Z3" class="fan" d="M856 122 L880 494 L852 494 Z" />
+        <path id="fan-C-Z3" class="fan" d="M856 508 L880 136 L852 136 Z" />
       </g>
 
       <g class="walls">
-        <rect x="102" y="110" width="796" height="20" />
-        <rect x="102" y="110" width="20" height="340" />
-        <rect x="878" y="110" width="20" height="340" />
+        <rect id="wall-z2" x="152" y="112" width="696" height="18" />
+        <rect id="wall-z1" x="152" y="112" width="18" height="406" />
+        <rect id="wall-z3" x="830" y="112" width="18" height="406" />
+        <rect class="open-wall" x="152" y="500" width="696" height="18" />
       </g>
 
-      <g class="links">
-        <path id="link-AB" class="radio" d="M182 166 Q500 250 818 166" />
-        <path id="link-AG" class="radio" d="M168 168 Q300 330 466 342" />
-        <path id="link-BG" class="radio" d="M832 168 Q700 330 534 342" />
-        <path id="link-GS" class="radio wifi" d="M534 352 Q600 420 676 428" />
+      <g class="heads">
+        <circle cx="178" cy="104" r="4" /><circle cx="822" cy="104" r="4" />
+        <circle cx="144" cy="122" r="4" /><circle cx="144" cy="508" r="4" />
+        <circle cx="856" cy="122" r="4" /><circle cx="856" cy="508" r="4" />
       </g>
 
       <g class="callouts">
-        <g class="tag" id="tag-A-WALL" transform="translate(330 172)"><rect x="-30" y="-12" width="60" height="22" /><text y="4">A-WALL</text></g>
-        <g class="tag" id="tag-B-WALL" transform="translate(670 172)"><rect x="-30" y="-12" width="60" height="22" /><text y="4">B-WALL</text></g>
-        <g class="tag" id="tag-A-SIDE" transform="translate(196 400)"><rect x="-30" y="-12" width="60" height="22" /><text y="4">A-SIDE</text></g>
-        <g class="tag" id="tag-B-SIDE" transform="translate(804 400)"><rect x="-30" y="-12" width="60" height="22" /><text y="4">B-SIDE</text></g>
+        <g class="tag" id="tag-A-Z2" transform="translate(300 94)"><rect x="-26" y="-11" width="52" height="20" /><text y="4">A-Z2</text></g>
+        <g class="tag" id="tag-B-Z2" transform="translate(700 94)"><rect x="-26" y="-11" width="52" height="20" /><text y="4">B-Z2</text></g>
+        <g class="tag" id="tag-A-Z1" transform="translate(106 208)"><rect x="-26" y="-11" width="52" height="20" /><text y="4">A-Z1</text></g>
+        <g class="tag" id="tag-D-Z1" transform="translate(106 422)"><rect x="-26" y="-11" width="52" height="20" /><text y="4">D-Z1</text></g>
+        <g class="tag" id="tag-B-Z3" transform="translate(894 208)"><rect x="-26" y="-11" width="52" height="20" /><text y="4">B-Z3</text></g>
+        <g class="tag" id="tag-C-Z3" transform="translate(894 422)"><rect x="-26" y="-11" width="52" height="20" /><text y="4">C-Z3</text></g>
       </g>
+
+      <!-- the mesh: filled in by plan.js (10 links, relay routes) -->
+      <g class="mesh" id="mesh"></g>
+      <path id="link-GS" class="radio wifi" d="M562 324 Q700 560 866 572" />
 
       <g class="unit" id="unit-A" data-state="unknown">
-        <rect class="box" x="134" y="134" width="48" height="34" />
-        <text class="letter" x="158" y="157">A</text>
-        <text class="unit-state middle" x="158" y="190" id="unit-A-state">—</text>
+        <rect class="box" x="178" y="136" width="104" height="36" />
+        <text class="letter" x="196" y="160">A</text>
+        <text class="unit-state" x="214" y="159" id="unit-A-state">—</text>
+        <g class="buzzer" id="buzz-A" transform="translate(186 192)"><path d="M0 -5h4l5 -4v18l-5 -4h-4z" /><path class="wave" d="M13 -3q3 4 0 8M16 -6q6 7 0 14" /></g>
       </g>
       <g class="unit" id="unit-B" data-state="unknown">
-        <rect class="box" x="818" y="134" width="48" height="34" />
-        <text class="letter" x="842" y="157">B</text>
-        <text class="unit-state middle" x="842" y="190" id="unit-B-state">—</text>
+        <rect class="box" x="718" y="136" width="104" height="36" />
+        <text class="letter" x="736" y="160">B</text>
+        <text class="unit-state" x="754" y="159" id="unit-B-state">—</text>
+        <g class="buzzer" id="buzz-B" transform="translate(790 192)"><path d="M0 -5h4l5 -4v18l-5 -4h-4z" /><path class="wave" d="M13 -3q3 4 0 8M16 -6q6 7 0 14" /></g>
+      </g>
+      <g class="unit" id="unit-C" data-state="unknown">
+        <rect class="box" x="718" y="458" width="104" height="36" />
+        <text class="letter" x="736" y="482">C</text>
+        <text class="unit-state" x="754" y="481" id="unit-C-state">—</text>
+      </g>
+      <g class="unit" id="unit-D" data-state="unknown">
+        <rect class="box" x="178" y="458" width="104" height="36" />
+        <text class="letter" x="196" y="482">D</text>
+        <text class="unit-state" x="214" y="481" id="unit-D-state">—</text>
       </g>
       <g class="unit gateway" id="unit-G" data-state="unknown">
-        <rect class="box" x="466" y="330" width="68" height="34" />
-        <text class="letter" x="500" y="353">GW</text>
-        <text class="unit-state middle" x="500" y="384" id="unit-G-state">—</text>
+        <rect class="box" x="438" y="296" width="124" height="38" />
+        <text class="letter" x="461" y="321">GW</text>
+        <text class="unit-state" x="484" y="320" id="unit-G-state">—</text>
       </g>
       <g class="server" id="unit-S">
-        <rect class="box" x="676" y="414" width="40" height="26" />
-        <path class="base" d="M668 444 h56" />
-        <text class="unit-state" x="732" y="432">Server</text>
-        <text class="wifi-label" x="668" y="462" id="wifi-label"></text>
+        <rect class="box" x="846" y="572" width="40" height="26" />
+        <path class="base" d="M838 602 h56" />
+        <text class="unit-state end" x="830" y="590">Server</text>
+        <text class="wifi-label end" x="830" y="608" id="wifi-label"></text>
       </g>
 
-      <g class="title-block" transform="translate(30 470)">
+      <g class="legend" transform="translate(530 576)">
+        <line x1="0" y1="0" x2="26" y2="0" class="radio up" /><text x="32" y="4">direct</text>
+        <line x1="90" y1="0" x2="116" y2="0" class="radio relayed" /><text x="122" y="4">relayed</text>
+        <line x1="0" y1="20" x2="26" y2="20" class="radio down" /><text x="32" y="24">no link</text>
+        <line x1="90" y1="20" x2="116" y2="20" class="route" /><text x="122" y="24">relay route</text>
+      </g>
+
+      <g class="title-block" transform="translate(30 570)">
         <rect width="450" height="70" />
         <line x1="0" y1="35" x2="450" y2="35" />
         <line x1="150" y1="0" x2="150" y2="70" />
@@ -132,8 +245,8 @@
         <text class="tb-value" x="10" y="29" id="tb-site">—</text>
         <text class="tb-label" x="160" y="15">Gateway boot</text>
         <text class="tb-value mono" x="160" y="29" id="tb-gw-boot">—</text>
-        <text class="tb-label" x="310" y="15">Server boot</text>
-        <text class="tb-value mono" x="310" y="29" id="tb-srv-boot">—</text>
+        <text class="tb-label" x="310" y="15">Mesh</text>
+        <text class="tb-value" x="310" y="29" id="tb-mesh">—</text>
         <text class="tb-label" x="10" y="50">Firmware</text>
         <text class="tb-value" x="10" y="64" id="tb-fw">—</text>
         <text class="tb-label" x="160" y="50">Server link</text>
@@ -145,7 +258,7 @@
     </div>
   </section>
 
-  <aside class="side">
+  <aside class="side only-overview">
     <section class="control" id="control" aria-labelledby="control-title">
       <h2 id="control-title">Control</h2>
       <p class="control-who" id="control-who"></p>
@@ -153,9 +266,11 @@
       <div class="control-body" id="control-live">
         <fieldset class="target" id="target">
           <legend>Apply to</legend>
-          <label><input type="radio" name="target" value="both" checked><span>Both modules</span></label>
-          <label><input type="radio" name="target" value="A"><span>Module A</span></label>
-          <label><input type="radio" name="target" value="B"><span>Module B</span></label>
+          <label><input type="radio" name="target" value="all" checked><span>All four</span></label>
+          <label><input type="radio" name="target" value="A"><span>A</span></label>
+          <label><input type="radio" name="target" value="B"><span>B</span></label>
+          <label><input type="radio" name="target" value="C"><span>C</span></label>
+          <label><input type="radio" name="target" value="D"><span>D</span></label>
         </fieldset>
 
         <div class="actions">
@@ -166,7 +281,7 @@
         </div>
 
         <div class="maint" id="maint">
-          <p class="hint role-note">Maintenance and clearing faults need the maintenance role.</p>
+          <p class="hint role-note">Maintenance, clearing faults and relay tests need the maintenance role.</p>
           <h3>Maintenance</h3>
           <p class="hint">Sensors log but don't alarm. Ends by itself.</p>
           <div class="row">
@@ -184,13 +299,31 @@
           <div class="row">
             <label class="select"><span class="sr">Unit</span>
               <select id="clear-target">
-                <option value="both">Both modules</option>
+                <option value="all">All four modules</option>
                 <option value="A">Module A</option>
                 <option value="B">Module B</option>
+                <option value="C">Module C</option>
+                <option value="D">Module D</option>
                 <option value="gateway">Gateway</option>
               </select>
             </label>
             <button class="action compact" data-command="clear" data-confirm="Press again to clear" type="button">Clear</button>
+          </div>
+          <h3>Test the relays</h3>
+          <p class="hint">Treat one direct link as broken for a while. Its packets should go round through another board: watch the plan.</p>
+          <div class="row">
+            <label class="select"><span class="sr">Link</span>
+              <select id="cut-link"></select>
+            </label>
+            <label class="select narrow"><span class="sr">For</span>
+              <select id="cut-seconds">
+                <option value="60">1 min</option>
+                <option value="120">2 min</option>
+                <option value="300">5 min</option>
+                <option value="0">End test</option>
+              </select>
+            </label>
+            <button class="action compact" data-command="test_cut" type="button">Cut</button>
           </div>
         </div>
         <p class="result" id="result" role="status" aria-live="polite"></p>
@@ -205,26 +338,10 @@
         <p class="result" id="take-result" role="status" aria-live="polite"></p>
       </form>
     </section>
-
-    <section class="units" aria-labelledby="units-title">
-      <h2 id="units-title">Units</h2>
-      <table class="spec" id="spec">
-        <thead><tr><th scope="col"><span class="sr">Reading</span></th><th scope="col">Gateway</th><th scope="col">A</th><th scope="col">B</th></tr></thead>
-        <tbody></tbody>
-      </table>
-    </section>
-
-    <section class="integrity" aria-labelledby="integrity-title">
-      <h2 id="integrity-title">Link integrity</h2>
-      <dl class="facts" id="facts"></dl>
-      <h3>Refused packets</h3>
-      <dl class="facts rejects" id="rejects"></dl>
-      <h3>Server audit</h3>
-      <ol class="audit" id="audit"></ol>
-    </section>
   </aside>
 
-  <section class="log" aria-labelledby="log-title">
+  <!-- ================= Log: events, units, link integrity ================= -->
+  <section class="log only-log" aria-labelledby="log-title">
     <div class="log-head">
       <h2 id="log-title">Event log</h2>
       <div class="filters" role="group" aria-label="Show">
@@ -232,6 +349,7 @@
         <button type="button" data-filter="alerts" aria-pressed="false">Alerts</button>
         <button type="button" data-filter="access" aria-pressed="false">Sign-ins</button>
         <button type="button" data-filter="commands" aria-pressed="false">Commands</button>
+        <button type="button" data-filter="radio" aria-pressed="false">Radio</button>
         <button type="button" data-filter="system" aria-pressed="false">System</button>
       </div>
       <label class="select unit-filter"><span class="sr">Unit</span>
@@ -240,6 +358,8 @@
           <option value="G">Gateway</option>
           <option value="A">Module A</option>
           <option value="B">Module B</option>
+          <option value="C">Module C</option>
+          <option value="D">Module D</option>
         </select>
       </label>
       <label class="search"><span class="sr">Search the log</span>
@@ -252,7 +372,7 @@
         <thead><tr>
           <th scope="col" class="c-no">No.</th><th scope="col" class="c-time">Time</th><th scope="col" class="c-unit">Unit</th>
           <th scope="col" class="c-p">P</th><th scope="col" class="c-type">Type</th><th scope="col">Event</th>
-          <th scope="col" class="c-zone">Zone</th><th scope="col" class="c-by">By</th><th scope="col" class="c-res">Result</th>
+          <th scope="col" class="c-zone">Sensor</th><th scope="col" class="c-by">By</th><th scope="col" class="c-res">Result</th>
         </tr></thead>
         <tbody></tbody>
       </table>
@@ -260,6 +380,31 @@
       <button class="link-button more" id="more" type="button" hidden>Show older events</button>
     </div>
   </section>
+
+  <aside class="side only-log">
+    <section class="units" aria-labelledby="units-title">
+      <h2 id="units-title">Units</h2>
+      <table class="spec" id="spec">
+        <thead><tr><th scope="col"><span class="sr">Reading</span></th><th scope="col">GW</th><th scope="col">A</th><th scope="col">B</th><th scope="col">C</th><th scope="col">D</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <section class="integrity" aria-labelledby="integrity-title">
+      <h2 id="integrity-title">Link integrity</h2>
+      <h3 class="first">Radio mesh</h3>
+      <table class="links" id="mesh-table">
+        <thead><tr><th scope="col">Link</th><th scope="col">Path</th><th scope="col"><span class="sr">Note</span></th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <h3>Server</h3>
+      <dl class="facts" id="facts"></dl>
+      <h3>Refused packets</h3>
+      <dl class="facts rejects" id="rejects"></dl>
+      <h3>Server audit</h3>
+      <ol class="audit" id="audit"></ol>
+    </section>
+  </aside>
 
 </main>
 

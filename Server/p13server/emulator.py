@@ -1,13 +1,15 @@
-"""A stand-in for the gateway and both sensor modules, for working on the
+"""A stand-in for the gateway and the four sensor modules, for working on the
 dashboard without hardware. It speaks the real protocol: signed packets,
 replay protection, challenge-response login with the demo accounts, roles,
-command results, log numbering and re-sends.
+command results, log numbering and re-sends. It also plays the site: PIR
+warnings, wall-pair confirmations, escalation while an alarm is active, and
+mesh links that now and then fail and get relayed through another board.
 
 Run in-process:   python -m p13server --emulate
 Run over MQTT:    python tools/gateway_emulator.py   (connects to Mosquitto as the gateway)
 
 The dashboard says "emulated gateway" while this is in use. It is a test tool:
-the module behaviour is simplified (no PIR timing, no keypads).
+the module behaviour is simplified (no keypads, PIR timing approximate).
 """
 
 from __future__ import annotations
@@ -21,8 +23,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable
 
-from .protocol import (TARGET_BOTH, Cmd, Node, Packet, PacketError, PeerTracker, Result, Role, Track,
-                       Type, decode, make_boot_id, needs_freshness, verify)
+from .protocol import (MESH_ORDER, MODULES, NODE_LETTERS, TARGET_ALL, ZONES, Cmd, Node, Packet, PacketError,
+                       PeerTracker, Result, Role, Track, Type, decode, make_boot_id, needs_freshness, verify)
 
 # Gateway/secrets.h demo accounts: PBKDF2-HMAC-SHA256(password, "p13-pc:" + user, 100000)
 DEMO_USERS = {
@@ -31,19 +33,33 @@ DEMO_USERS = {
 }
 ROLE_NEEDED = {Cmd.ARM: Role.OPERATOR, Cmd.DISARM: Role.OPERATOR, Cmd.ACK_ALARM: Role.OPERATOR,
                Cmd.MAINT_END: Role.OPERATOR, Cmd.MAINT_START: Role.MAINTENANCE, Cmd.CLEAR_FAULT: Role.MAINTENANCE,
-               Cmd.SET_TIME: Role.NONE, Cmd.RESEND_LOG: Role.NONE}
+               Cmd.TEST_CUT: Role.MAINTENANCE, Cmd.SET_TIME: Role.NONE, Cmd.RESEND_LOG: Role.NONE}
 CMD_NAMES = {Cmd.ARM: "ARM", Cmd.DISARM: "DISARM", Cmd.MAINT_START: "MAINT", Cmd.MAINT_END: "MAINT_END",
              Cmd.ACK_ALARM: "ACK_ALARM", Cmd.CLEAR_FAULT: "CLEAR_FAULT", Cmd.SET_TIME: "SET_TIME",
-             Cmd.RESEND_LOG: "RESEND_LOG", Cmd.LOGOUT: "LOGOUT"}
+             Cmd.RESEND_LOG: "RESEND_LOG", Cmd.LOGOUT: "LOGOUT", Cmd.TEST_CUT: "TEST_CUT"}
 SESSION_IDLE, SESSION_MAX = 300, 1800
-# For demos and tests: how often something moves (seconds) and how often a wall
-# trigger is confirmed by the other module (0..1).
+WINDOW = 20.0                       # corroboration window (s)
+# For demos and tests: how often something moves (seconds), how often a trigger
+# is confirmed by the PIR at the other end of the wall (0..1), and how often a
+# mesh link fails for a while (0..1 per scene).
 SCENE_EVERY = float(os.environ.get("P13_EMULATOR_INTERVAL", "45"))
 CONFIRM_CHANCE = float(os.environ.get("P13_EMULATOR_CONFIRM", "0.35"))
+LINK_FAULT_CHANCE = float(os.environ.get("P13_EMULATOR_LINK_FAULTS", "0.25"))
+
+PIRS = {"A": [2, 1], "B": [2, 3], "C": [3], "D": [1]}       # each module's PIRs, by zone
 
 
-def _prio(state: str) -> int:
-    return {"INTRUSION": 2, "TAMPER_FAULT": 3}.get(state, 0)
+def pir(letter: str, zone: int) -> str:
+    return f"{letter}-Z{zone}"
+
+
+def partner(zone: int, letter: str) -> str:
+    a, b = ZONES[zone]
+    return b if letter == a else a
+
+
+def zone_text(zones) -> str:
+    return "+".join(str(z) for z in sorted(zones)) or "-"
 
 
 @dataclass
@@ -53,19 +69,28 @@ class EmuModule:
     state: str = "BOOT"
     log_no: int = 0
     armed_mode: bool = False
-    warning_until: float = 0.0
     maint_until: float = 0.0
     lid_open: bool = False
-    rssi: int = field(default_factory=lambda: random.randint(-62, -48))
+    alarm_zones: set = field(default_factory=set)
+    hits: dict = field(default_factory=dict)            # zone -> time of our PIR's last trigger
+    seen_until: float = 0.0                             # the partner PIR fired (P1) until then
+    forwarded: int = 0
+    rssi: int = field(default_factory=lambda: random.randint(-64, -48))
 
     @property
-    def peer(self) -> str:
-        return "B" if self.letter == "A" else "A"
+    def full(self) -> bool:                             # A and B: tamper, buzzer, 3 LEDs
+        return self.letter in "AB"
 
     @property
     def priority(self) -> int:
-        p = _prio(self.state)
-        return 1 if p == 0 and time.time() < self.warning_until else p
+        if self.state == "TAMPER_FAULT":
+            return 3
+        if self.state == "INTRUSION":
+            return 2
+        now = time.time()
+        if self.state == "ARMED" and (any(now - t < WINDOW for t in self.hits.values()) or now < self.seen_until):
+            return 1
+        return 0
 
     def log(self, typ: str, event: str, zone: str = "-", result: str = "-", prio: int | None = None,
             user: str = "-", at: float | None = None) -> None:
@@ -79,13 +104,24 @@ class EmuModule:
 
     def go(self, state: str, reason: str) -> None:
         old, self.state = self.state, state
+        if state != "INTRUSION":
+            self.alarm_zones = set()
+        if state == "ARMED":
+            self.hits.clear()
+            self.seen_until = 0.0
         self.log("STATE", f"{old}->{state} ({reason})")
 
     def status_text(self) -> str:
-        wall = "WARMUP" if self.state == "BOOT" else "OK"
-        return (f"{self.letter},{self.state},P{self.priority},WALL:{wall},SIDE:{wall},"
-                f"LID:{'OPEN' if self.lid_open else 'SHUT'},LCD:OK,PEER:UP,LOCK:0,LOGNO:{self.log_no},"
-                f"CH:{self.gw.channel},RSSI:{self.rssi + random.randint(-2, 2)}")
+        health = "WARMUP" if self.state == "BOOT" else "OK"
+        now = time.time()
+        hit = {z for z, t in self.hits.items() if now - t < WINDOW} if self.state in ("ARMED", "INTRUSION") else set()
+        zones = ",".join(f"Z{z}:{health}" for z in PIRS[self.letter])
+        lid = ("OPEN" if self.lid_open else "SHUT") if self.full else "NONE"
+        cut = "".join(o for o in MESH_ORDER if o != self.letter and self.gw.test_cut(self.letter, o))
+        return (f"{self.letter},{self.state},P{self.priority},{zones},HIT:{zone_text(hit)},"
+                f"ALM:{zone_text(self.alarm_zones) if self.state == 'INTRUSION' else '-'},LID:{lid},LCD:OK,LOCK:0,"
+                f"LOGNO:{self.log_no},CH:{self.gw.channel},NET:{self.gw.net_text(self.letter)},FWD:{self.forwarded}"
+                + (f",CUT:{cut}" if cut else "") + ",FW:6.0")
 
     def apply(self, cmd: int, role: int, who: str, arg: int) -> tuple[int, str]:
         """Module-side checks, as SensorModule.ino applyCommand()."""
@@ -147,6 +183,16 @@ class EmuModule:
                 res, why = Result.REFUSED, "Lid open"
             else:
                 self.go("RECOVERY", f"fault cleared by {who}")
+        elif cmd == Cmd.TEST_CUT:
+            other = NODE_LETTERS.get(arg >> 16)
+            secs = min(arg & 0xFFFF, 300)
+            if not other or other == self.letter:
+                res, why = Result.BAD, "Not a link of this module"
+            else:
+                self.gw.cut_link(self.letter, other, secs)
+                name = "Gateway" if other == "G" else f"Module {other}"
+                why = (f"Direct link to {name} cut for {secs} s (relay test)" if secs
+                       else f"Relay test ended: direct link to {name} back")
         msg = CMD_NAMES[cmd] + (f": {why}" if why else "")
         self.log("CMD", msg, result=Result(res).name, user=who)
         return res, why
@@ -190,8 +236,12 @@ class EmulatedGateway:
         self.session: dict | None = None
         self.fails = 0
         self.locked_until = 0.0
-        self.mods = {"A": EmuModule("A", self), "B": EmuModule("B", self)}
+        self.mods = {m: EmuModule(m, self) for m in MODULES}
         self.next_scene = time.monotonic() + min(12, SCENE_EVERY)
+        self.later: list[tuple[float, Callable[[], None]]] = []     # events a few seconds from now
+        self.down: dict[frozenset, tuple[float, str]] = {}         # failed direct links: until, "test" / "fault"
+        self.routes: dict[tuple[str, str], str] = {}                # logged way each board reaches each other
+        self.forwarded = 0
         if history:
             self._history()
         self.glog("SYSTEM", f"Boot #{self.boot_no} reason=POWER_ON")
@@ -221,32 +271,108 @@ class EmulatedGateway:
     def _history(self) -> None:
         """A plausible past day, so a fresh dashboard has something to show."""
         t = time.time() - 26 * 3600
-        a, b = self.mods["A"], self.mods["B"]
+        a, b, c, d = (self.mods[x] for x in MODULES)
         steps = [
             (0, lambda at: self.glog("SYSTEM", "Boot #40 reason=POWER_ON", at=at)),
             (40, lambda at: self.glog("COMM", "Server link connected (TLS)", at=at)),
             (900, lambda at: self.glog("AUTH", "Card + PIN accepted", result="SUCCESS", user="Operator1@GW **:BE:EF", at=at)),
-            (905, lambda at: self.glog("CMD", "ARM sent to A+B", result="SENT", user="Operator1@GW", at=at)),
-            (906, lambda at: a.log("STATE", "DISARMED->ARMED (armed by Operator1@GW)", at=at)),
-            (906, lambda at: b.log("STATE", "DISARMED->ARMED (armed by Operator1@GW)", at=at)),
-            (907, lambda at: self.glog("CMD", "ARM: A:OK B:OK", result="OK", user="Operator1@GW", at=at)),
-            (14400, lambda at: a.log("ALERT", "Motion warning 1/3", zone="A-SIDE", prio=1, at=at)),
-            (31000, lambda at: b.log("ALERT", "Motion warning 1/3", zone="B-WALL", prio=1, at=at)),
-            (31002, lambda at: a.log("ALERT", "Motion seen by Module B", zone="B-WALL", prio=1, at=at)),
-            (31009, lambda at: a.log("ALERT", "Intrusion: B-WALL + A-WALL", zone="A-WALL", prio=2, at=at)),
-            (31009, lambda at: b.log("ALERT", "Module A confirmed: B-WALL + A-WALL", prio=2, at=at)),
+            (905, lambda at: self.glog("CMD", "ARM sent to all", result="SENT", user="Operator1@GW", at=at)),
+        ] + [(906, (lambda m: lambda at: m.log("STATE", "DISARMED->ARMED (armed by Operator1@GW)", at=at))(m))
+             for m in (a, b, c, d)] + [
+            (907, lambda at: self.glog("CMD", "ARM: A:OK B:OK C:OK D:OK", result="OK", user="Operator1@GW", at=at)),
+            (9000, lambda at: d.log("COMM", "Gateway: direct link lost, relayed through Module A", at=at)),
+            (9000, lambda at: self.glog("COMM", "Module D: direct link lost, relayed through Module A", at=at)),
+            (9420, lambda at: d.log("COMM", "Gateway: direct link back", at=at)),
+            (9420, lambda at: self.glog("COMM", "Module D: direct link back", at=at)),
+            (14400, lambda at: a.log("ALERT", "Motion warning 1/3", zone="A-Z1", prio=1, at=at)),
+            (14401, lambda at: d.log("ALERT", "Motion seen by Module A", zone="A-Z1", prio=1, at=at)),
+            (31000, lambda at: b.log("ALERT", "Motion warning 1/3", zone="B-Z2", prio=1, at=at)),
+            (31001, lambda at: a.log("ALERT", "Motion seen by Module B", zone="B-Z2", prio=1, at=at)),
+            (31009, lambda at: a.log("ALERT", "Intrusion zone 2: B-Z2 + A-Z2", zone="A-Z2", prio=2, at=at)),
+            (31009, lambda at: b.log("ALERT", "Module A confirmed (zone 2): B-Z2 + A-Z2", prio=2, at=at)),
+            (31009, lambda at: c.log("ALERT", "Module A confirmed (zone 2): B-Z2 + A-Z2", prio=2, at=at)),
+            (31009, lambda at: d.log("ALERT", "Module A confirmed (zone 2): B-Z2 + A-Z2", prio=2, at=at)),
+            (31052, lambda at: c.log("ALERT", "Intrusion zone 3 (escalated): C-Z3 during the alarm", zone="C-Z3", prio=2, at=at)),
             (31120, lambda at: self.glog("AUTH", "Dashboard login (OPERATOR)", result="SUCCESS", user="operator@web", at=at)),
-            (31131, lambda at: self.glog("CMD", "ACK_ALARM: A:OK B:OK", result="OK", user="operator@web", at=at)),
+            (31131, lambda at: self.glog("CMD", "ACK_ALARM: A:OK B:OK C:OK D:OK", result="OK", user="operator@web", at=at)),
             (52000, lambda at: self.glog("AUTH", "Card + PIN refused", result="FAIL", user="card **:9A:01@GW", at=at)),
             (52010, lambda at: self.glog("AUTH", "Card + PIN refused", result="FAIL", user="card **:9A:01@GW", at=at)),
-            (61200, lambda at: self.glog("CMD", "DISARM: A:OK B:OK", result="OK", user="Operator1@GW", at=at)),
-            (61200, lambda at: a.log("STATE", "ARMED->DISARMED (disarmed by Operator1@GW)", at=at)),
-            (61200, lambda at: b.log("STATE", "ARMED->DISARMED (disarmed by Operator1@GW)", at=at)),
+            (61200, lambda at: self.glog("CMD", "DISARM: A:OK B:OK C:OK D:OK", result="OK", user="Operator1@GW", at=at)),
+        ] + [(61200, (lambda m: lambda at: m.log("STATE", "ARMED->DISARMED (disarmed by Operator1@GW)", at=at))(m))
+             for m in (a, b, c, d)] + [
             (88000, lambda at: self.glog("SYSTEM", "Power off", at=at)),
         ]
         for offset, fn in steps:
             fn(t + offset)
         self.queue.clear()          # old lines: the server fetches them with RESEND_LOG
+
+    # ---------------- the mesh ----------------
+    def node_log(self, letter: str, typ: str, event: str, **kw) -> None:
+        if letter == "G":
+            self.glog(typ, event, **{k: v for k, v in kw.items() if k in ("zone", "result", "user")})
+        else:
+            self.mods[letter].log(typ, event, **kw)
+
+    def link_ok(self, x: str, y: str) -> bool:
+        down = self.down.get(frozenset((x, y)))
+        return not down or time.monotonic() >= down[0]
+
+    def test_cut(self, x: str, y: str) -> bool:
+        down = self.down.get(frozenset((x, y)))
+        return bool(down and down[1] == "test" and time.monotonic() < down[0])
+
+    def cut_link(self, x: str, y: str, secs: int) -> None:
+        if secs:
+            self.down[frozenset((x, y))] = (time.monotonic() + secs, "test")
+        else:
+            self.down.pop(frozenset((x, y)), None)
+
+    def route(self, x: str, y: str) -> str:
+        """How x reaches y: 'D' straight, a relay's letter (lowercase), or '-'."""
+        if self.link_ok(x, y):
+            return "D"
+        for r in sorted((r for r in MESH_ORDER if r not in (x, y)), key=lambda r: r != "G"):   # the gateway first
+            if self.link_ok(x, r) and self.link_ok(r, y):
+                return r.lower()
+        return "-"
+
+    def net_text(self, letter: str) -> str:
+        return "".join("*" if o == letter else self.route(letter, o) for o in MESH_ORDER)
+
+    def mesh_tick(self) -> None:
+        now = time.monotonic()
+        for pair, (until, why) in list(self.down.items()):
+            if now >= until:
+                del self.down[pair]
+                if why == "test":
+                    x, y = sorted(pair)
+                    self.node_log(x if x != "G" else y, "COMM", f"Relay test over: direct link to "
+                                  f"{'Gateway' if 'G' in pair else 'Module ' + (y if x != 'G' else x)} back in use")
+        for x in MESH_ORDER:                          # each board logs a change in how it reaches another
+            for y in MESH_ORDER:
+                if x == y:
+                    continue
+                r = self.route(x, y)
+                old = self.routes.get((x, y), "D")
+                if r == old:
+                    continue
+                self.routes[(x, y)] = r
+                name = "Gateway" if y == "G" else f"Module {y}"
+                if r == "D":
+                    self.node_log(x, "COMM", f"{name}: direct link back")
+                elif r == "-":
+                    self.node_log(x, "COMM", f"{name} link DOWN (alarm still works here)")
+                else:
+                    via = "Gateway" if r == "g" else f"Module {r.upper()}"
+                    self.node_log(x, "COMM", f"{name}: direct link lost, relayed through {via}")
+        for x in MESH_ORDER:                          # relays pass on about 2 packets a second each way
+            for y in MESH_ORDER:
+                r = self.route(x, y) if x != y else "D"
+                if r not in ("D", "-"):
+                    if r == "g":
+                        self.forwarded += 1
+                    else:
+                        self.mods[r.upper()].forwarded += 1
 
     # ---------------- packets ----------------
     def send(self, ptype: int, *, code: int = 0, arg: int = 0, result: int = 0, role: int = 0, session: int = 0,
@@ -372,19 +498,33 @@ class EmulatedGateway:
         if role < need:
             self.report(cmd, seq, Result.DENIED, f"Needs {Role(need).name}", who)
             return
+        if cmd == Cmd.TEST_CUT and (p.target == Node.GATEWAY or (p.arg >> 16) == Node.GATEWAY):
+            other = NODE_LETTERS.get(p.target if p.target != Node.GATEWAY else p.arg >> 16)
+            secs = min(p.arg & 0xFFFF, 300)
+            if other not in MODULES:
+                self.report(cmd, seq, Result.BAD, "Not a module", who)
+                return
+            self.cut_link("G", other, secs)
+            self.report(cmd, seq, Result.OK, f"Direct link G-{other} cut for {secs} s (relay test)" if secs
+                        else f"Relay test ended: G-{other} direct again", who)
+            return
         if p.target == Node.GATEWAY:
             self.report(cmd, seq, Result.REFUSED if cmd == Cmd.CLEAR_FAULT else Result.BAD,
                         "No gateway tamper" if cmd == Cmd.CLEAR_FAULT else "Not a gateway command", who)
             return
-        letters = {TARGET_BOTH: "AB", Node.MOD_A: "A", Node.MOD_B: "B"}.get(p.target)
-        if not letters:
+        letters = MODULES if p.target == TARGET_ALL else NODE_LETTERS.get(p.target, "")
+        if not letters or letters == "G":
             self.report(cmd, seq, Result.BAD, "Unknown target", who)
             return
-        self.glog("CMD", f"{CMD_NAMES[cmd]} sent to {'A+B' if len(letters) == 2 else letters}", result="SENT", user=who)
+        if cmd == Cmd.TEST_CUT and len(letters) > 1:
+            self.report(cmd, seq, Result.BAD, "Pick one link", who)
+            return
+        self.glog("CMD", f"{CMD_NAMES[cmd]} sent to {'all' if len(letters) == 4 else letters}", result="SENT", user=who)
         overall, parts = Result.OK, []
         for ch in letters:
             res, why = self.mods[ch].apply(cmd, role, who, p.arg)
-            parts.append(f"{ch}:{'OK' if res == Result.OK else (why or Result(res).name)}")
+            ok_text = why if cmd == Cmd.TEST_CUT and why else "OK"
+            parts.append(f"{ch}:{ok_text if res == Result.OK else (why or Result(res).name)}")
             if res != Result.OK and overall == Result.OK:
                 overall = res
         self.report(cmd, seq, overall, " ".join(parts), who)
@@ -397,26 +537,82 @@ class EmulatedGateway:
     def system_priority(self) -> int:
         return max((m.priority for m in self.mods.values()), default=0)
 
+    def in_alarm(self) -> list[EmuModule]:
+        return [m for m in self.mods.values() if m.state == "INTRUSION"]
+
+    def confirm(self, m: EmuModule, zones: set, why: str, zone_name: str) -> None:
+        """m confirms an intrusion: it and every armed module go to alarm (SensorModule.ino)."""
+        m.alarm_zones |= zones
+        m.log("ALERT", f"Intrusion zone {zone_text(zones)}: {why}", zone=zone_name, prio=2)
+        m.go("INTRUSION", why)
+        m.alarm_zones = set(zones)
+        self.alarm_others(m, zones, why)
+
+    def alarm_others(self, m: EmuModule, zones: set, why: str) -> None:
+        for o in self.mods.values():
+            if o is m:
+                continue
+            note = f"Module {m.letter} confirmed (zone {zone_text(zones)}): {why}"
+            if o.state == "ARMED":
+                o.log("ALERT", note, prio=2)
+                o.go("INTRUSION", f"Module {m.letter} alarm")
+                o.alarm_zones = set(zones)
+            elif o.state == "INTRUSION":
+                o.alarm_zones |= zones
+                o.log("ALERT", note.replace("confirmed", "also confirmed"), prio=2)
+
+    def trigger(self, m: EmuModule, zone: int) -> None:
+        """One of m's PIRs fired: the module's rules (handleArmed / handleIntrusion)."""
+        now = time.time()
+        name = pir(m.letter, zone)
+        if m.state == "INTRUSION":                      # escalation: any PIR = intrusion in its zone, at once
+            if zone in m.alarm_zones:
+                m.log("ALERT", "Motion during intrusion", zone=name, prio=2)
+                return
+            m.alarm_zones.add(zone)
+            why = f"{name} during the alarm"
+            m.log("ALERT", f"Intrusion zone {zone} (escalated): {why}", zone=name, prio=2)
+            self.alarm_others(m, {zone}, why)
+            return
+        if m.state != "ARMED":
+            return
+        other = self.mods[partner(zone, m.letter)]
+        busy = [x for x in self.in_alarm() if x is not m]
+        if busy:
+            m.hits[zone] = now
+            self.confirm(m, {zone}, f"{name} while Module {busy[0].letter} is in alarm", name)
+            return
+        if now - other.hits.get(zone, -1e9) < WINDOW:
+            m.hits[zone] = now
+            self.confirm(m, {zone}, f"{pir(other.letter, zone)} + {name}", name)
+            return
+        m.hits[zone] = now
+        m.log("ALERT", "Motion warning 1/3", zone=name, prio=1)
+        if other.state == "ARMED":
+            other.seen_until = now + WINDOW
+            other.log("ALERT", f"Motion seen by Module {m.letter}", zone=name, prio=1)
+
     def scene(self) -> None:
-        """Now and then something moves along the wall."""
+        """Now and then something moves along a wall, or a radio link has a bad minute."""
+        if random.random() < LINK_FAULT_CHANCE and not any(w == "fault" for _, w in self.down.values()):
+            x, y = random.choice([("D", "G"), ("A", "C"), ("B", "D"), ("C", "G"), ("A", "B")])
+            self.down[frozenset((x, y))] = (time.monotonic() + random.uniform(25, 60), "fault")
+        alarmed = self.in_alarm()
+        if alarmed:                                     # an intruder still about: another wall, at once
+            m = random.choice([m for m in self.mods.values() if m.state in ("ARMED", "INTRUSION")] or alarmed)
+            fresh = [z for z in PIRS[m.letter] if z not in m.alarm_zones] or PIRS[m.letter]
+            if random.random() < 0.6:
+                self.trigger(m, random.choice(fresh))
+            return
         armed = [m for m in self.mods.values() if m.state == "ARMED"]
         if not armed:
             return
         m = random.choice(armed)
-        zone = random.choice(["WALL", "WALL", "SIDE"]) if CONFIRM_CHANCE < 1 else "WALL"
-        m.warning_until = time.time() + 20
-        m.log("ALERT", "Motion warning 1/3", zone=f"{m.letter}-{zone}", prio=1)
-        if zone == "WALL":
-            other = self.mods[m.peer]
-            if other.state == "ARMED":
-                other.warning_until = time.time() + 20
-                other.log("ALERT", f"Motion seen by Module {m.letter}", zone=f"{m.letter}-WALL", prio=1)
-            if random.random() < CONFIRM_CHANCE and other.state == "ARMED":
-                why = f"{m.letter}-WALL + {other.letter}-WALL"
-                other.log("ALERT", f"Intrusion: {why}", zone=f"{other.letter}-WALL", prio=2)
-                other.go("INTRUSION", why)
-                m.log("ALERT", f"Module {other.letter} confirmed: {why}", prio=2)
-                m.go("INTRUSION", f"Module {other.letter} alarm")
+        zone = random.choice(PIRS[m.letter])
+        self.trigger(m, zone)
+        other = self.mods[partner(zone, m.letter)]
+        if random.random() < CONFIRM_CHANCE:            # the intruder walks on: the other end's PIR fires
+            self.later.append((time.monotonic() + random.uniform(2, 7), lambda: self.trigger(other, zone)))
 
     async def run(self) -> None:
         tick = 0
@@ -430,9 +626,15 @@ class EmulatedGateway:
                 self.glog("COMM", "Server link DOWN")
             if self.session and (now - self.session["last"] > SESSION_IDLE or now - self.session["start"] > SESSION_MAX):
                 self.end_session("idle 5 min" if now - self.session["last"] > SESSION_IDLE else "30 min limit", notify=True)
-            if tick % 50 == 0:                              # every second: three status packets
+            if self.later:
+                due = [fn for at, fn in self.later if at <= now]
+                self.later = [(at, fn) for at, fn in self.later if at > now]
+                for fn in due:
+                    fn()
+            if tick % 50 == 0:                              # every second: five status packets
                 for m in self.mods.values():
                     m.tick()
+                self.mesh_tick()
                 if self.scenario and now > self.next_scene:
                     self.next_scene = now + random.uniform(SCENE_EVERY * 0.6, SCENE_EVERY * 1.4)
                     self.scene()
@@ -443,10 +645,14 @@ class EmulatedGateway:
                 sess = self.session["user"] if self.session else "-"
                 g = (f"G,READY,P{self.system_priority()},RFID:OK,LCD:OK,LID:SHUT,USER:{sess},"
                      f"TIME:{'Y' if self.time_base else 'N'},KPLOCK:0,PCLOCK:{max(0, int(self.locked_until - now))},"
-                     f"LOGNO:{self.gw_no},WIFI:-51,CH:{self.channel},FW:5.4 (emulated)")
+                     f"LOGNO:{self.gw_no},WIFI:-51,CH:{self.channel},NET:{self.net_text('G')},FWD:{self.forwarded}"
+                     + (f",CUT:{''.join(x for x in MODULES if self.test_cut('G', x))}"
+                        if any(self.test_cut("G", x) for x in MODULES) else "") + ",FW:6.0 (emulated)")
                 self.send(kind, code=Node.GATEWAY, arg=self.unix(), text=g)
-                for node, m in ((Node.MOD_A, self.mods["A"]), (Node.MOD_B, self.mods["B"])):
-                    self.send(kind, code=node, arg=self.unix(), text=m.status_text())
+                for letter, m in self.mods.items():
+                    rssi = f",RSSI:{m.rssi + random.randint(-2, 2)}" if self.link_ok(letter, "G") else ""
+                    self.send(kind, code=int(Node.MOD_A) + MODULES.index(letter), arg=self.unix(),
+                              text=m.status_text() + rssi)
             elif self.server_online:
                 if self.queue:
                     n = self.queue.pop(0)

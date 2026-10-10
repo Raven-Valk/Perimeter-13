@@ -1,14 +1,18 @@
 // =====================================================================
-//  link_protocol.h  —  v3 (firmware 5.4), shared by every part of Project 13:
-//    Sensor Module A, Sensor Module B, Gateway, and the server (Server/p13server/protocol.py
+//  link_protocol.h  —  v4 (firmware 6.0), shared by every part of Project 13:
+//    Sensor Modules A, B, C, D, the Gateway, and the server (Server/p13server/protocol.py
 //    is the same format in Python). Keep this file IDENTICAL in every sketch folder.
 //
-//  Links:  Module A <-> Module B,  Module A/B <-> Gateway   (ESP-NOW radio)
-//          Gateway <-> Server                               (Wi-Fi, MQTT over TLS)
+//  Links:  a full mesh of 5 radios (ESP-NOW): A, B, C, D and the gateway each
+//          talk straight to the other 4 (10 links). If one link fails, its
+//          packets go through a third board that still hears both (mesh.h).
+//          Gateway <-> Server: Wi-Fi, MQTT over TLS.
 //
 //  Every packet is:
-//    * signed with HMAC-SHA256 using the key of that one link
-//      (A<->B, A<->Gateway, B<->Gateway, Gateway<->Server each have their own key),
+//    * signed with HMAC-SHA256 using the key of that one link (each of the 10
+//      radio links and Gateway<->Server has its own key). A relayed packet keeps
+//      the signature of the two END boards, so the board in the middle can pass
+//      it on but can't read the key, change it, or make one up,
 //    * numbered (bootId + seq) so copies and old packets are rejected,
 //    * addressed (src + dst), so a packet for A can't be fed to B,
 //    * for commands and alarms: tied to the receiver's CURRENT boot (dstBoot),
@@ -24,9 +28,11 @@
 // Declared early so the Arduino IDE / Wokwi auto-prototypes compile when this
 // file is pasted into a single-file sketch.
 struct LinkPacket;
+struct MeshPeer;      // mesh.h
+class Mesh;
 
-#define LINK_VERSION    3
-#define FIRMWARE_VERSION "5.4"
+#define LINK_VERSION    4
+#define FIRMWARE_VERSION "6.0"
 #define ESPNOW_DEFAULT_CHANNEL 1  // until the gateway's Wi-Fi decides: the gateway uses its
                                   // network's channel and the modules find it by themselves
 #define SIG_LEN         8      // bytes of HMAC-SHA256 kept in each packet
@@ -34,14 +40,39 @@ struct LinkPacket;
 
 // Wokwi simulator only (WOKWI_SIM 1): Wokwi can't do ESP-NOW between two
 // simulations, so the same signed packets travel over a public MQTT broker.
-// Each part listens on  <base>/to/<letter>  (A, B, G = gateway, P = server).
+// Each part listens on  <base>/to/<letter>  (A, B, C, D, G = gateway, P = server).
 // The real gateway uses the same topic layout on the server's own broker:
 //   p13/<SITE_ID>/to/G  and  p13/<SITE_ID>/to/P   (see Gateway/secrets.h).
 #define MQTT_BROKER      "broker.hivemq.com"
 #define MQTT_PORT        1883
-#define MQTT_TOPIC_BASE  "pinnacle13/p13-2d386efc/v5"
+#define MQTT_TOPIC_BASE  "pinnacle13/p13-2d386efc/v6"
 
-enum LinkNode : uint8_t { NODE_NONE = 0, NODE_MOD_A = 1, NODE_MOD_B = 2, NODE_GATEWAY = 9, NODE_SERVER = 10 };
+enum LinkNode : uint8_t { NODE_NONE = 0, NODE_MOD_A = 1, NODE_MOD_B = 2, NODE_MOD_C = 3, NODE_MOD_D = 4,
+                         NODE_GATEWAY = 9, NODE_SERVER = 10 };
+inline bool isModule(uint8_t n) { return n >= NODE_MOD_A && n <= NODE_MOD_D; }
+
+// ---------------- the site: a rectangle, modules at the corners ----------------
+//        A ---- zone 2 ---- B          Each protected wall (zone) has a PIR at
+//        |                  |          both ends, mounted on the OUTSIDE face
+//     zone 1      G      zone 3        and looking along it (a "curtain").
+//        |                  |          Wall C-D has no sensors.
+//        D -----(none)----- C          G = gateway, in the middle.
+//  Zone 1 = wall A-D (PIRs "A-Z1", "D-Z1"), zone 2 = wall A-B ("A-Z2", "B-Z2"),
+//  zone 3 = wall B-C ("B-Z3", "C-Z3"). A and B have buzzers: an intrusion in a
+//  zone sounds the buzzer of each module on that wall that has one.
+const uint8_t SITE_ZONES = 3;
+const uint8_t ZONE_END1[SITE_ZONES + 1] = { 0, NODE_MOD_A, NODE_MOD_A, NODE_MOD_B };
+const uint8_t ZONE_END2[SITE_ZONES + 1] = { 0, NODE_MOD_D, NODE_MOD_B, NODE_MOD_C };
+inline uint8_t zoneBit(uint8_t z) { return z >= 1 && z <= SITE_ZONES ? 1 << (z - 1) : 0; }
+inline uint8_t zonePartner(uint8_t z, uint8_t me) {      // the module at the other end of zone z's wall
+  if (!zoneBit(z)) return NODE_NONE;
+  return ZONE_END1[z] == me ? ZONE_END2[z] : ZONE_END2[z] == me ? ZONE_END1[z] : (uint8_t)NODE_NONE;
+}
+inline uint8_t zonesOf(uint8_t node) {                  // the walls a module stands on (bit mask)
+  uint8_t m = 0;
+  for (uint8_t z = 1; z <= SITE_ZONES; z++) if (ZONE_END1[z] == node || ZONE_END2[z] == node) m |= zoneBit(z);
+  return m;
+}
 
 enum LinkType : uint8_t {
   L_HELLO      = 1,  // status beat that also says "this is my boot ID". At boot and every 10th beat.
@@ -49,8 +80,9 @@ enum LinkType : uint8_t {
   L_LOG        = 3,  // one event-log line (logNo = line number; code 1 = re-sent on request)
   L_ACK        = 4,  // gateway -> module: reply to each status beat ("link alive").
                      //   HELLO / ACK from the gateway: code = its radio channel (0 = not said)
-  L_PEER_EVENT = 5,  // module -> module: one of my zones fired (code = zone, arg = age in ms)
-  L_PEER_ALARM = 6,  // module -> module: I confirmed an intrusion, sound too (arg = alarm no., text = why)
+  L_PEER_EVENT = 5,  // module -> module at the other end of the wall: my PIR on zone `code` fired (arg = age in ms)
+  L_PEER_ALARM = 6,  // module -> the other modules: intrusion confirmed, alarm everyone
+                     //   (code = zones in alarm (bits), arg = alarm no., text = why)
   L_CMD        = 7,  // gateway -> module: command (code = Cmd, role, arg, text = "user@source")
   L_CMD_RESULT = 8,  // result of a command (code = Cmd, result, arg = the command packet's seq, text = details)
                      //   module -> gateway, and gateway -> server
@@ -83,13 +115,15 @@ enum Cmd : uint8_t {
   CMD_SET_TIME = 7,      // arg = Unix time (seconds)
   CMD_RESEND_LOG = 8,    // arg = first log line number wanted
   CMD_LOGOUT = 9,        // server -> gateway: end the session
-  CMD_MAX = 9
+  CMD_TEST_CUT = 10,     // test the relays: treat the direct link to node (arg >> 16) as broken
+                         //   for (arg & 0xFFFF) seconds (max 300; 0 = end the test). MAINTENANCE only.
+  CMD_MAX = 10
 };
-// Command target (L_PC_CMD): 0 = both modules, or NODE_MOD_A / NODE_MOD_B / NODE_GATEWAY
-const uint8_t TARGET_BOTH = 0;
+// Command target (L_PC_CMD): 0 = all four modules, or NODE_MOD_A..D / NODE_GATEWAY
+const uint8_t TARGET_ALL = 0;
+const uint32_t TEST_CUT_MAX_S = 300;
 enum CmdResult : uint8_t { RES_OK = 0, RES_REFUSED = 1, RES_DENIED = 2, RES_BAD = 3 };
 enum Role : uint8_t { R_NONE = 0, R_OPERATOR = 1, R_MAINTENANCE = 2 };
-enum ZoneCode : uint8_t { ZONE_WALL = 1, ZONE_SIDE = 2 };
 enum Health : uint8_t { H_OK = 0, H_WARMUP = 1, H_STUCK = 2, H_OFFLINE = 3 };
 
 // Sensor module states, as sent in LinkPacket.state (the module's own enum must match).
@@ -105,6 +139,8 @@ struct LinkPacket {
   uint8_t  src;            // LinkNode of the sender
   uint8_t  dst;            // LinkNode it is meant for
   uint8_t  type;           // LinkType
+  uint8_t  via;            // 0 = sent straight to dst; else the board asked to pass it on (one hop)
+  uint8_t  mesh;           // the boards the sender hears directly right now (meshBit() of each)
   uint32_t bootId;         // random number chosen at the sender's boot
   uint32_t seq;            // +1 on every packet the sender sends (replay protection)
   uint32_t dstBoot;        // the receiver's bootId as the sender last saw it (0 = unknown)
@@ -117,7 +153,7 @@ struct LinkPacket {
   uint8_t  result;         // L_CMD_RESULT: CmdResult
   uint32_t arg;            // number argument, depending on type
   uint32_t session;        // L_PC_CMD / L_LOGIN_RESULT: session ID
-  uint8_t  target;         // L_PC_CMD: which board the command is for (TARGET_BOTH, NODE_...)
+  uint8_t  target;         // L_PC_CMD: which board the command is for (TARGET_ALL, NODE_...)
   uint8_t  textLen;        // bytes used in text[]
   char     text[LINK_TEXT_MAX];
   uint8_t  sig[SIG_LEN];   // HMAC over every byte above
@@ -209,13 +245,19 @@ inline bool bootIsNewer(uint32_t a, uint32_t b) {      // is boot a later than b
 #endif
 }
 
-// Tracks one sender's boot ID + sequence number to reject replayed packets.
-enum TrackResult : uint8_t { TR_OK, TR_SYNCED, TR_NEW_BOOT, TR_REPLAY, TR_UNSYNCED, TR_OLD_BOOT };
+// Tracks one sender's boot ID + sequence numbers to reject replayed packets.
+// With relays a packet can arrive twice (straight and through another board) or
+// a little out of order, so the last 32 sequence numbers are remembered:
+// each one is accepted once (TR_LATE if it is older than the newest seen),
+// a second copy is a duplicate (TR_DUP, dropped quietly), anything older is refused.
+enum TrackResult : uint8_t { TR_OK, TR_LATE, TR_SYNCED, TR_NEW_BOOT, TR_DUP, TR_REPLAY, TR_UNSYNCED, TR_OLD_BOOT };
+const uint8_t SEQ_WINDOW = 32;
 struct PeerTracker {
   bool     synced = false;
   bool     online = false;
   bool     sendHello = false;     // the sender has an out-of-date idea of OUR boot: send it a HELLO
   uint32_t bootId = 0, lastSeq = 0, lastHeard = 0;
+  uint32_t seen = 0;              // bit i set = packet (lastSeq - i) has arrived
 
   TrackResult accept(const LinkPacket& p) {
     TrackResult r;
@@ -227,16 +269,34 @@ struct PeerTracker {
       if (p.type != L_HELLO) return TR_UNSYNCED;                             // wait for its HELLO
       r = TR_SYNCED;
     }
-    else if (p.bootId != bootId || p.seq <= lastSeq)        return TR_REPLAY; // old or copied packet
-    else                                                    r = TR_OK;
-    bootId = p.bootId; lastSeq = p.seq; synced = true; lastHeard = millis();
+    else if (p.bootId != bootId) return TR_REPLAY;                           // from another boot
+    else if (p.seq > lastSeq) {                                              // the newest so far
+      uint32_t shift = p.seq - lastSeq;
+      seen = shift >= SEQ_WINDOW ? 1 : (seen << shift) | 1;
+      lastSeq = p.seq; lastHeard = millis();
+      return TR_OK;
+    }
+    else {                                                                   // older: once, if still in the window
+      uint32_t back = lastSeq - p.seq;
+      if (back >= SEQ_WINDOW) return TR_REPLAY;
+      if (seen & (1UL << back)) return TR_DUP;
+      seen |= 1UL << back; lastHeard = millis();
+      return TR_LATE;
+    }
+    bootId = p.bootId; lastSeq = p.seq; seen = 1; synced = true; lastHeard = millis();
     return r;
   }
 };
 
 inline char nodeLetter(uint8_t n) {
-  switch (n) { case NODE_MOD_A: return 'A'; case NODE_MOD_B: return 'B';
-               case NODE_GATEWAY: return 'G'; case NODE_SERVER: return 'P'; default: return '?'; }
+  switch (n) { case NODE_MOD_A: return 'A'; case NODE_MOD_B: return 'B'; case NODE_MOD_C: return 'C';
+               case NODE_MOD_D: return 'D'; case NODE_GATEWAY: return 'G'; case NODE_SERVER: return 'P';
+               default: return '?'; }
+}
+inline uint8_t nodeFromLetter(char c) {
+  switch (c) { case 'A': case 'a': return NODE_MOD_A; case 'B': case 'b': return NODE_MOD_B;
+               case 'C': case 'c': return NODE_MOD_C; case 'D': case 'd': return NODE_MOD_D;
+               case 'G': case 'g': return NODE_GATEWAY; default: return NODE_NONE; }
 }
 
 inline const char* roleName(uint8_t r) {
@@ -249,7 +309,7 @@ inline const char* cmdName(uint8_t c) {
     case CMD_MAINT_START: return "MAINT";   case CMD_MAINT_END: return "MAINT_END";
     case CMD_ACK_ALARM: return "ACK_ALARM"; case CMD_CLEAR_FAULT: return "CLEAR_FAULT";
     case CMD_SET_TIME: return "SET_TIME";   case CMD_RESEND_LOG: return "RESEND_LOG";
-    case CMD_LOGOUT: return "LOGOUT";
+    case CMD_LOGOUT: return "LOGOUT";       case CMD_TEST_CUT: return "TEST_CUT";
     default: return "UNKNOWN";
   }
 }

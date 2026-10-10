@@ -1,11 +1,12 @@
-// The Units table: one row per reading, one column per unit.
+// The Units table: one row per reading, one column per unit (gateway + four modules).
 
 import { $, h } from "./dom.js";
-import { moduleState } from "./posture.js";
+import { moduleState, MODULES } from "./posture.js";
+import { meshLinks } from "./mesh.js";
 
-const STATE = { ARMED: "Armed", DISARMED: "Disarmed", INTRUSION: "Intrusion", TAMPER_FAULT: "Tamper / fault",
-                MAINTENANCE: "Maintenance", BOOT: "Starting", RECOVERY: "Self-test", READY: "Ready",
-                GW_TAMPER: "Lid open", offline: "Not reporting", unknown: "—" };
+const STATE = { ARMED: "Armed", DISARMED: "Disarmed", INTRUSION: "Intrusion", TAMPER_FAULT: "Tamper",
+                MAINTENANCE: "Maint.", BOOT: "Starting", RECOVERY: "Self-test", READY: "Ready",
+                GW_TAMPER: "Lid open", offline: "Silent", unknown: "—" };
 const tone = {
   state: (v) => ({ ARMED: "good", READY: "good", INTRUSION: "bad", TAMPER_FAULT: "bad", GW_TAMPER: "bad",
                    offline: "bad", MAINTENANCE: "warn", BOOT: "warn", RECOVERY: "warn" })[v] || "",
@@ -14,45 +15,57 @@ const tone = {
   ok: (v) => ({ OK: "good", OFFLINE: "bad" })[v] || "",
 };
 const words = {
-  health: (v) => ({ OK: "OK", WARMUP: "Warming up", STUCK: "Stuck", OFFLINE: "Unplugged" })[v] || v,
-  lid: (v) => ({ SHUT: "Shut", OPEN: "Open" })[v] || v,
+  health: (v) => ({ OK: "OK", WARMUP: "Warming", STUCK: "Stuck", OFFLINE: "Unplugged" })[v] || v,
+  lid: (v) => ({ SHUT: "Shut", OPEN: "Open", NONE: "None" })[v] || v,
   ok: (v) => ({ OK: "OK", OFFLINE: "Missing" })[v] || v,
-  lock: (v) => (v === undefined ? undefined : Number(v) > 0 ? `${v} s left` : "None"),
+  lock: (v) => (v === undefined ? undefined : Number(v) > 0 ? `${v} s` : "No"),
 };
 
 function cell(value, cls = "") {
-  if (value === undefined || value === null || value === "") return h("td", { class: "dim" }, "—");
+  if (value === undefined || value === null || value === "" || (Array.isArray(value) && !value.length))
+    return h("td", { class: "dim" }, "—");
+  if (Array.isArray(value)) return h("td", {}, ...value.map(([v, c]) => h("span", { class: `line ${c || ""}`.trim() }, v)));
   return h("td", { class: cls }, value);
 }
 
 export function renderUnits(st) {
   const { nodes, link } = st;
-  const g = (link && link.gateway ? nodes.G : {}) || {};
-  const m = { A: nodes.A || {}, B: nodes.B || {} };
+  const gw = !!(link && link.gateway);
+  const g = (gw ? nodes.G : {}) || {};
+  const m = Object.fromEntries(MODULES.map((k) => [k, nodes[k] || {}]));
   const sOf = (k) => moduleState(m[k]);
-  const live = (k) => !["offline", "unknown"].includes(sOf(k));
-  const gs = link && link.gateway ? g.state : "offline";
-  const dbm = (v) => (v && v !== "-" ? `${String(v).replace("-", "\u2212")} dBm` : undefined);
-  const radio = (k) => (live(k) ? dbm(m[k].RSSI) : undefined);
+  const live = (k) => gw && !["offline", "unknown"].includes(sOf(k));
+  const gs = gw ? g.state : "offline";
+  const dbm = (v) => (v && v !== "-" ? `${String(v).replace("-", "−")}` : undefined);
+  const links = meshLinks(nodes, gw);
+  const mesh = (k) => {                          // this unit's four links: "4" or "3 + 1r"
+    const mine = links.filter((l) => l.a === k || l.b === k);
+    const direct = mine.filter((l) => l.state === "direct").length;
+    const relayed = mine.filter((l) => l.state === "relayed").length;
+    if (!mine.some((l) => l.state !== "unknown")) return [undefined];
+    return [relayed ? `${direct} + ${relayed} relayed` : `${direct} direct`, relayed ? "warn" : direct < 4 ? "bad" : "good"];
+  };
+  const each = (fn) => MODULES.map((k) => (live(k) ? fn(k) : [undefined]));
 
   const rows = [
-    ["State", [STATE[gs] || gs, tone.state(gs)], ...["A", "B"].map((k) => [STATE[sOf(k)] || sOf(k), tone.state(sOf(k))])],
-    ["Priority", [g.system_priority !== undefined ? `P${g.system_priority}` : undefined],
-      ...["A", "B"].map((k) => [live(k) && m[k].priority !== undefined ? `P${m[k].priority}` : undefined,
-                               Number(m[k].priority) >= 2 ? "bad" : Number(m[k].priority) === 1 ? "warn" : ""])],
-    ["Wall sensor", [], ...["A", "B"].map((k) => [live(k) ? words.health(m[k].WALL) : undefined, tone.health(m[k].WALL)])],
-    ["Side sensor", [], ...["A", "B"].map((k) => [live(k) ? words.health(m[k].SIDE) : undefined, tone.health(m[k].SIDE)])],
-    ["Enclosure", [words.lid(g.LID), tone.lid(g.LID)], ...["A", "B"].map((k) => [live(k) ? words.lid(m[k].LID) : undefined, tone.lid(m[k].LID)])],
-    ["Display", [words.ok(g.LCD), tone.ok(g.LCD)], ...["A", "B"].map((k) => [live(k) ? words.ok(m[k].LCD) : undefined, tone.ok(m[k].LCD)])],
-    ["Card reader", [words.ok(g.RFID), tone.ok(g.RFID)], [], []],
-    ["Other module", [], ...["A", "B"].map((k) => [live(k) ? ({ UP: "Linked", DOWN: "No link" })[m[k].PEER] : undefined,
-                                                   m[k].PEER === "DOWN" ? "bad" : ""])],
-    ["Signal", [dbm(g.WIFI)], [radio("A")], [radio("B")]],
+    ["State", [STATE[gs] || gs, tone.state(gs)], ...MODULES.map((k) => [gw ? STATE[sOf(k)] || sOf(k) : undefined, tone.state(sOf(k))])],
+    ["Priority", [gw && g.system_priority !== undefined ? `P${g.system_priority}` : undefined],
+      ...each((k) => [m[k].priority !== undefined ? `P${m[k].priority}` : undefined,
+                      Number(m[k].priority) >= 2 ? "bad" : Number(m[k].priority) === 1 ? "warn" : ""])],
+    ["PIRs", [], ...each((k) => [Object.keys(m[k]).filter((x) => /^Z[1-3]$/.test(x)).sort()
+      .map((z) => [`${z} ${words.health(m[k][z])}`, tone.health(m[k][z])])])],
+    ["Alarm zones", [], ...each((k) => [m[k].ALM && m[k].ALM !== "-" ? m[k].ALM : undefined, "bad"])],
+    ["Enclosure", [words.lid(g.LID), tone.lid(g.LID)], ...each((k) => [words.lid(m[k].LID), tone.lid(m[k].LID)])],
+    ["Display", [words.ok(g.LCD), tone.ok(g.LCD)], ...each((k) => [words.ok(m[k].LCD), tone.ok(m[k].LCD)])],
+    ["Card reader", [words.ok(g.RFID), tone.ok(g.RFID)], [], [], [], []],
+    ["Mesh links", gw ? mesh("G") : [undefined], ...each((k) => mesh(k))],
+    ["Relayed", [gw ? g.FWD : undefined], ...each((k) => [m[k].FWD])],
+    ["Signal dBm", [dbm(g.WIFI)], ...each((k) => [dbm(m[k].RSSI)])],
     ["Keypad lock", [words.lock(g.KPLOCK), Number(g.KPLOCK) > 0 ? "warn" : ""],
-      ...["A", "B"].map((k) => [live(k) ? words.lock(m[k].LOCK) : undefined, Number(m[k].LOCK) > 0 ? "warn" : ""])],
-    ["Dashboard lock", [words.lock(g.PCLOCK), Number(g.PCLOCK) > 0 ? "warn" : ""], [], []],
-    ["Real time", [g.TIME ? (g.TIME === "Y" ? "Synced" : "Not yet") : undefined, g.TIME === "N" ? "warn" : ""], [], []],
-    ["Log line", [g.LOGNO], [live("A") ? m.A.LOGNO : undefined], [live("B") ? m.B.LOGNO : undefined]],
+      ...each((k) => [words.lock(m[k].LOCK), Number(m[k].LOCK) > 0 ? "warn" : ""])],
+    ["Web lock", [words.lock(g.PCLOCK), Number(g.PCLOCK) > 0 ? "warn" : ""], [], [], [], []],
+    ["Real time", [g.TIME ? (g.TIME === "Y" ? "Synced" : "Not yet") : undefined, g.TIME === "N" ? "warn" : ""], [], [], [], []],
+    ["Log line", [g.LOGNO], ...each((k) => [m[k].LOGNO])],
   ];
   const body = $("#spec tbody");
   body.replaceChildren(...rows.map(([label, ...cols]) =>

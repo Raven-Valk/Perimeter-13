@@ -108,10 +108,10 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
         status, s = await self.sign_in("operator", "operator123")
         self.assertEqual(status, 200)
         self.assertTrue(s["control"])
-        await self.rig.until(lambda: self.rig.emu.mods["A"].state == "DISARMED")
-        status, r = await self.post("/api/commands", {"command": "arm", "target": "both"})
-        self.assertEqual((status, r["result"], r["text"]), (200, "OK", "A:OK B:OK"))
-        self.assertEqual(self.rig.emu.mods["B"].state, "ARMED")
+        await self.rig.until(lambda: all(m.state == "DISARMED" for m in self.rig.emu.mods.values()))
+        status, r = await self.post("/api/commands", {"command": "arm", "target": "all"})
+        self.assertEqual((status, r["result"], r["text"]), (200, "OK", "A:OK B:OK C:OK D:OK"))
+        self.assertEqual(self.rig.emu.mods["D"].state, "ARMED")
         status, r = await self.post("/api/commands", {"command": "maint_start", "target": "A", "seconds": 60})
         self.assertEqual(status, 403)                    # operators can't start maintenance
 
@@ -167,6 +167,59 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(s["control"])
         status, _ = await self.post("/api/session", {"user": "operator", "password": "operator123"})
         self.assertEqual(status, 503)                    # never signed in before: can't be checked
+
+    # ---------------- four modules, zones, mesh ----------------
+    async def test_status_of_all_five_boards_reaches_the_dashboard(self):
+        await self.rig.until(lambda: all(self.rig.link.nodes[n].get("NET") for n in "GABCD")
+                             and self.rig.link.nodes["D"].get("state") == "DISARMED")
+        nodes = self.rig.link.nodes
+        self.assertEqual(nodes["C"]["LID"], "NONE")                 # C and D: no tamper switch fitted
+        self.assertEqual((nodes["A"].get("Z1"), nodes["A"].get("Z2"), nodes["D"].get("Z1")), ("OK", "OK", "OK"))
+        self.assertEqual(nodes["A"]["NET"], "*DDDD")
+        self.assertEqual(nodes["G"]["NET"], "DDDD*")
+
+    async def test_relay_test_cuts_one_link_and_it_gets_relayed(self):
+        await self.sign_in()
+        await self.rig.until(lambda: self.rig.link.nodes["A"].get("NET"))
+        status, r = await self.post("/api/commands", {"command": "test_cut", "link": "A-C", "seconds": 60})
+        self.assertEqual((status, r["result"]), (200, "OK"), r)
+        await self.rig.until(lambda: self.rig.link.nodes["A"].get("NET", "")[2:3] == "g")   # A -> C through G
+        self.assertEqual(self.rig.link.nodes["C"]["NET"][0], "g")
+        self.assertEqual(self.rig.link.nodes["A"].get("CUT"), "C")
+        status, r = await self.post("/api/commands", {"command": "test_cut", "link": "D-G", "seconds": 30})
+        self.assertEqual((status, r["result"]), (200, "OK"), r)
+        self.assertIn("G-D cut", r["text"])
+        status, _ = await self.post("/api/commands", {"command": "test_cut", "link": "A-A"})
+        self.assertEqual(status, 400)
+        status, _ = await self.post("/api/commands", {"command": "test_cut", "link": "A-C", "seconds": 999})
+        self.assertEqual(status, 400)
+
+    async def test_relay_test_needs_maintenance(self):
+        await self.sign_in("operator", "operator123")
+        status, _ = await self.post("/api/commands", {"command": "test_cut", "link": "A-B"})
+        self.assertEqual(status, 403)
+
+    async def test_wall_pair_confirms_then_any_pir_escalates(self):
+        emu = self.rig.emu
+        await self.rig.until(lambda: all(m.state == "DISARMED" for m in emu.mods.values()))
+        for m in emu.mods.values():
+            m.apply(1, 2, "test", 0)                                 # ARM
+        emu.trigger(emu.mods["B"], 2)                                # B-Z2 alone: a warning
+        self.assertEqual(emu.mods["B"].priority, 1)
+        self.assertEqual(emu.mods["A"].state, "ARMED")
+        emu.trigger(emu.mods["A"], 2)                                # A-Z2 within 20 s: intrusion, zone 2
+        self.assertTrue(all(m.state == "INTRUSION" for m in emu.mods.values()))
+        self.assertEqual(emu.mods["D"].alarm_zones, {2})
+        emu.trigger(emu.mods["C"], 3)                                # one hit on wall B-C: escalates at once
+        self.assertEqual(emu.mods["B"].alarm_zones, {2, 3})
+        await self.rig.until(lambda: self.rig.link.nodes["B"].get("ALM") == "2+3")
+        for m in emu.mods.values():
+            m.apply(5, 1, "test", 0)                                 # ACK_ALARM
+        for m in emu.mods.values():
+            m.tick()
+        self.assertTrue(all(m.state == "ARMED" for m in emu.mods.values()))
+        emu.trigger(emu.mods["D"], 1)                                # after the ack: back to the normal rules
+        self.assertEqual(emu.mods["D"].state, "ARMED")
 
     # ---------------- packets ----------------
     async def test_replayed_packet_is_refused(self):

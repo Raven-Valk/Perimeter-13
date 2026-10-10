@@ -29,17 +29,17 @@ def run(*args, stdin=None):
 
 rng = random.Random(13)
 key = bytes(rng.randrange(256) for _ in range(32))
-texts = ["", "A,ARMED,P0,WALL:OK,SIDE:OK,LID:SHUT,LCD:OK,PEER:UP,LOCK:0,LOGNO:55,CH:11",
-         "1042,7,183220,1760000000,A,P2,ARMED,ALERT,Intrusion: B-WALL + A-WALL,A-WALL,-,-", "x" * 200]
+texts = ["", "A,ARMED,P1,Z2:OK,Z1:OK,HIT:2,ALM:-,LID:SHUT,LCD:OK,LOCK:0,LOGNO:55,CH:11,NET:*DgDD,FWD:3,FW:6.0",
+         "1042,7,183220,1760000000,A,P2,ARMED,ALERT,Intrusion zone 2: B-Z2 + A-Z2,A-Z2,-,-", "x" * 200]
 
 # 1. C++ signs, Python decodes and verifies
 for i, text in enumerate(texts):
-    f = [10, 9, rng.randrange(1, 14), rng.getrandbits(32), rng.getrandbits(32), rng.getrandbits(32),
+    f = [10, 9, rng.randrange(1, 14), rng.choice([0, 1, 9]), rng.randrange(32), rng.getrandbits(32), rng.getrandbits(32), rng.getrandbits(32),
          rng.getrandbits(32), rng.randrange(256), rng.randrange(4), rng.randrange(256), rng.randrange(256),
          rng.randrange(3), rng.randrange(4), rng.getrandbits(32), rng.getrandbits(32), rng.randrange(256)]
     raw = bytes.fromhex(run("sign", key.hex(), *f, text))
     p, body = P.decode(raw)
-    ok = P.verify(key, body, p.sig) and [p.src, p.dst, p.type, p.boot_id, p.seq, p.dst_boot, p.log_no, p.state,
+    ok = P.verify(key, body, p.sig) and [p.src, p.dst, p.type, p.via, p.mesh, p.boot_id, p.seq, p.dst_boot, p.log_no, p.state,
                                          p.priority, p.reset_reason, p.code, p.role, p.result, p.arg, p.session,
                                          p.target] == f and p.text == text[:160]
     check(ok, f"C++ packet {i} decodes and verifies in Python")
@@ -48,14 +48,15 @@ for i, text in enumerate(texts):
 # 2. Python signs, C++ verifies
 for i, text in enumerate(texts):
     p = P.Packet(P.Node.SERVER, P.Node.GATEWAY, P.Type.PC_CMD, boot_id=rng.getrandbits(32), seq=i + 1,
-                 dst_boot=rng.getrandbits(32), code=P.Cmd.ARM, target=P.TARGET_BOTH, session=rng.getrandbits(32),
-                 arg=rng.getrandbits(32), text=text)
+                 dst_boot=rng.getrandbits(32), code=P.Cmd.ARM, target=P.TARGET_ALL, session=rng.getrandbits(32),
+                 arg=rng.getrandbits(32), via=i % 2, mesh=0b10110, text=text)
     raw = p.encode(key)
     out = run("verify", key.hex(), raw.hex())
-    fields = out.split(" ", 18)
-    got_text = fields[18] if len(fields) > 18 else ""
+    fields = out.split(" ", 20)
+    got_text = fields[20] if len(fields) > 20 else ""
     ok = (fields[0] == "OK" and int(fields[1]) == P.Node.SERVER and int(fields[3]) == P.Type.PC_CMD
-          and int(fields[4]) == p.boot_id and int(fields[15]) == p.session and int(fields[17]) == len(text[:160])
+          and int(fields[4]) == p.via and int(fields[5]) == p.mesh
+          and int(fields[6]) == p.boot_id and int(fields[17]) == p.session and int(fields[19]) == len(text[:160])
           and got_text == text[:160])
     check(ok, f"Python packet {i} verifies in C++")
     tampered = bytearray(raw); tampered[30] ^= 1
@@ -74,11 +75,11 @@ decisions = []
 for _ in range(3000):
     t = rng.choice([1, 2, 2, 2, 3])
     b = rng.choice(boots)
-    s = rng.randrange(1, 60)
+    s = rng.randrange(1, 90)
     seq_lines.append(f"{t} {b} {s}")
     decisions.append(int(py.accept(P.Packet(10, 9, t, boot_id=b, seq=s))))
 cpp = [int(x) for x in run("track", stdin="\n".join(seq_lines)).split()]
-check(cpp == decisions, "replay tracker: 3000 random packets, identical decisions")
+check(cpp == decisions, "replay tracker (32-packet window): 3000 random packets, same decisions")
 
 print("ALL TESTS PASSED (0 failed)" if not fails else f"{fails} FAILED")
 sys.exit(1 if fails else 0)

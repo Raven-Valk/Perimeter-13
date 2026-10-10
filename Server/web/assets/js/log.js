@@ -9,11 +9,12 @@ const TYPES = {
   alerts: ["ALERT", "SENSOR", "TAMPER", "FAULT"],
   access: ["AUTH"],
   commands: ["CMD"],
-  system: ["SYSTEM", "COMM", "TEST", "HEALTH", "STATE", "MAINT", "INPUT"],
+  radio: ["COMM"],
+  system: ["SYSTEM", "TEST", "HEALTH", "STATE", "MAINT", "INPUT"],
 };
 const GOOD = new Set(["OK", "PASS", "SUCCESS", "SENT"]);
 const BAD = new Set(["FAIL", "REFUSED", "DENIED", "REJECTED", "LOCKED", "ERROR", "LOST", "BAD"]);
-const unitName = { G: "GW", A: "A", B: "B" };
+const unitName = { G: "GW", A: "A", B: "B", C: "C", D: "D" };
 const blank = (v) => (v && v !== "-" ? v : "");
 
 const view = { filter: "all", unit: "", q: "", rows: [], filtered: false, more: true };

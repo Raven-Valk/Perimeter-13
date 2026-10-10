@@ -35,7 +35,7 @@
     },
     {
       "type": "wokwi-pir-motion-sensor",
-      "id": "pirWall",
+      "id": "pirZ2",
       "top": 290,
       "left": -320,
       "attrs": {
@@ -45,7 +45,7 @@
     },
     {
       "type": "wokwi-pir-motion-sensor",
-      "id": "pirSide",
+      "id": "pirZ1",
       "top": 290,
       "left": -170,
       "attrs": {
@@ -244,36 +244,36 @@
     ],
     [
       "esp:17",
-      "pirWall:OUT",
+      "pirZ2:OUT",
       "gold",
       []
     ],
     [
-      "pirWall:VCC",
+      "pirZ2:VCC",
       "bb1:tp.5",
       "red",
       []
     ],
     [
-      "pirWall:GND",
+      "pirZ2:GND",
       "bb1:tn.5",
       "black",
       []
     ],
     [
       "esp:19",
-      "pirSide:OUT",
+      "pirZ1:OUT",
       "gold",
       []
     ],
     [
-      "pirSide:VCC",
+      "pirZ1:VCC",
       "bb1:tp.7",
       "red",
       []
     ],
     [
-      "pirSide:GND",
+      "pirZ1:GND",
       "bb1:tn.7",
       "black",
       []

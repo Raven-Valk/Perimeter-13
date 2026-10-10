@@ -22,9 +22,22 @@ pip install -r requirements.txt
 python3 -m p13server --emulate
 ```
 
-Open http://127.0.0.1:8080 and sign in as `operator` / `operator123` or `admin` / `admin123` (the demo accounts in `Gateway/secrets.h`). An emulated gateway and two modules run inside the server. The dashboard shows a striped banner the whole time, so nobody mistakes it for the real system. Every 45 s or so something moves along the wall; arm the system to see warnings and alarms.
+Open http://127.0.0.1:8080 and sign in as `operator` / `operator123` or `admin` / `admin123` (the demo accounts in `Gateway/secrets.h`). An emulated gateway and four modules run inside the server. The dashboard shows a striped banner the whole time, so nobody mistakes it for the real system. Every 45 s or so something moves along a wall; arm the system to see warnings, alarms and escalation. Now and then a radio link "fails" for a minute and is relayed.
 
-For a faster demo: `P13_EMULATOR_INTERVAL=8 P13_EMULATOR_CONFIRM=1 python3 -m p13server --emulate` makes every wall trigger a confirmed intrusion, every 8 seconds.
+For a faster demo: `P13_EMULATOR_INTERVAL=8 P13_EMULATOR_CONFIRM=1 python3 -m p13server --emulate` makes every trigger lead to a confirmed intrusion, every 8 seconds. `P13_EMULATOR_LINK_FAULTS` (0 to 1, default 0.25) sets how often a link fails.
+
+## The dashboard
+
+The **☰ menu** (top left) opens a side drawer:
+
+- **Overview:** the plan of the site — the four modules at the corners and the gateway in the middle, the PIR curtains on the **outside** of walls A–D, A–B and B–C, the 10 radio links (solid = direct, dashed amber = relayed, with the way round drawn through the relay), and which buzzers are sounding. Next to it, the controls.
+- **Log:** the event log with filters and search, the units table (gateway + A–D), and link integrity (each of the 10 links, the server link, refused packets, the server's own audit).
+- **Alerts on this device:** browser **notifications** for intrusions and (optionally) warnings, and a loud **siren** on an intrusion that keeps sounding until the alarm is acknowledged or you press **Silence**. A new zone joining the alarm sounds it again. Settings are kept in this browser only. Notifications need the HTTPS address (or 127.0.0.1); browsers only play sound after you've clicked once on the page.
+- **Account:** who is signed in, and Sign out.
+
+The sentence at the top says what is going on and stays on both views. During an alarm a red dot shows on the ☰ button and on "Log".
+
+**Relay test** (maintenance role, Overview → Test the relays): pick a link and a time. That direct link is treated as broken; within a few seconds the plan shows its packets going round through another board, and the log records it. "End test" puts it back at once.
 
 ## Install on the server laptop (Linux)
 
@@ -86,7 +99,7 @@ Logs: `journalctl -u p13server -f` and `journalctl -u mosquitto -f`.
 
 ## The event log
 
-The gateway numbers every line: its own and both modules'. The server stores each line once, in `data/p13.db` (SQLite).
+The gateway numbers every line: its own and the four modules'. The server stores each line once, in `data/p13.db` (SQLite).
 
 - **Missing lines:** if a number is missing for 2 seconds, the server asks the gateway to send it again. After 3 tries the range is recorded as lost.
 - **Server outages:** after the server was down, it fetches up to 3,000 missed lines.
@@ -102,4 +115,5 @@ The **Server audit** list shows what happened on the server itself: sign-ins (wi
 | The server can't reach its message broker | `systemctl status mosquitto`. On Linux the broker must be able to read `/etc/mosquitto/p13/` (the install script sets this). |
 | No contact with the gateway | The gateway's LCD: "PC:N" means it has no server link. Its USB log (`LOG,...` lines) says why: Wi-Fi not found, broker refused the password, TLS check failed (wrong CA, or `SERVER_NAME` not `p13-server`), or server not reachable (`SERVER_HOST`, firewall). |
 | Refused packets: bad signature | `KEY_GW_SERVER` in `Gateway/secrets.h` differs from `[gateway] key` in `config/p13server.toml`. |
-| A module isn't reporting | Its LCD shows the gateway link. After a channel change it takes up to about 10 s to find the gateway again. |
+| A module isn't reporting | Its LCD shows the mesh ("GW DOWN 2/4" = no gateway, 2 of its 4 links up). After a channel change it takes up to about 10 s to find the gateway again. If it is out of range of the gateway, it should still report through another module. |
+| A link stays "relayed" | Normal if a wall or distance is in the way. Move the boards, or the antenna ends of the ESP32s, to face each other. |

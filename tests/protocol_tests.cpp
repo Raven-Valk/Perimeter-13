@@ -1,6 +1,7 @@
 #include <openssl/evp.h>
 #include <cstdio>
 #include "link_protocol.h"
+#include "mesh.h"
 static const uint8_t K_AGW[32] = {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32};
 static const uint8_t K_BGW[32] = {9,9,9};
 static const uint8_t K_AB[32]  = {7,7,7};
@@ -24,7 +25,7 @@ Verdict moduleA(const LinkPacket& p, int len=sizeof(LinkPacket)){
   if(p.src==NODE_GATEWAY){key=K_AGW;t=&gwT;} else if(p.src==NODE_MOD_B){key=K_AB;t=&peerT;} else return R_UNKNOWN;
   if(!verify(p,key)) return R_SIG;
   if(linkNeedsFreshness(p.type) && p.dstBoot!=MY_BOOT) return R_STALE;
-  TrackResult tr=t->accept(p); if(tr==TR_REPLAY||tr==TR_OLD_BOOT||tr==TR_UNSYNCED) return R_REPLAY;
+  TrackResult tr=t->accept(p); if(tr==TR_REPLAY||tr==TR_DUP||tr==TR_OLD_BOOT||tr==TR_UNSYNCED) return R_REPLAY;
   return ACCEPT;
 }
 int main(){
@@ -35,9 +36,9 @@ int main(){
   LinkPacket s=mk(NODE_GATEWAY,NODE_MOD_A,L_ACK,G1,1,0,K_AGW);
   CHECK(linkWellFormed(s,sizeof(s)), "Good packet is well-formed");
   CHECK(!linkWellFormed(s,sizeof(s)-1), "Wrong length rejected");
-  LinkPacket v=s; v.version=2; CHECK(!linkWellFormed(v,sizeof(v)), "Old protocol version (v4 boards) rejected");
+  LinkPacket v=s; v.version=3; CHECK(!linkWellFormed(v,sizeof(v)), "Old protocol version (v5 boards) rejected");
   v=s; v.type=0; CHECK(!linkWellFormed(v,sizeof(v)), "Unknown type 0 rejected");
-  v=s; v.type=L_TYPE_MAX+1; CHECK(!linkWellFormed(v,sizeof(v)), "Unknown type 9 rejected");
+  v=s; v.type=L_TYPE_MAX+1; CHECK(!linkWellFormed(v,sizeof(v)), "Unknown type 14 rejected");
   v=s; v.textLen=LINK_TEXT_MAX+1; CHECK(!linkWellFormed(v,sizeof(v)), "Text length over 160 rejected");
 
   printf("\n-- signatures (one key per link) --\n");
@@ -65,10 +66,10 @@ int main(){
   CHECK(moduleA(mk(NODE_GATEWAY,NODE_MOD_A,L_ACK,G1,5,0,K_AGW))==ACCEPT, "Plain ACK needs no boot binding: accepted");
   CHECK(moduleA(mk(NODE_GATEWAY,NODE_MOD_B,L_CMD,G1,6,MY_BOOT,K_BGW,CMD_DISARM,R_OPERATOR))==IGNORE, "Packet for Module B: ignored by A");
   CHECK(moduleA(mk(NODE_SERVER,NODE_MOD_A,L_CMD,5,1,MY_BOOT,K_AGW,CMD_DISARM,R_OPERATOR))==R_UNKNOWN, "server talking to A directly: unknown sender");
-  CHECK(moduleA(mk(NODE_MOD_B,NODE_MOD_A,L_PEER_EVENT,BB1,1,MY_BOOT,K_AB,ZONE_WALL))==R_REPLAY, "Peer event before B's HELLO: waits (not acted on)");
+  CHECK(moduleA(mk(NODE_MOD_B,NODE_MOD_A,L_PEER_EVENT,BB1,1,MY_BOOT,K_AB,2))==R_REPLAY, "Peer event before B's HELLO: waits (not acted on)");
   CHECK(moduleA(mk(NODE_MOD_B,NODE_MOD_A,L_HELLO,BB1,2,0,K_AB))==ACCEPT, "Module B HELLO: link syncs");
-  CHECK(moduleA(mk(NODE_MOD_B,NODE_MOD_A,L_PEER_EVENT,BB1,3,MY_BOOT,K_AB,ZONE_WALL))==ACCEPT, "Peer WALL event from B: accepted");
-  CHECK(moduleA(mk(NODE_MOD_B,NODE_MOD_A,L_PEER_EVENT,BB1,3,MY_BOOT,K_AB,ZONE_WALL))==R_REPLAY, "Replayed peer event (fake corroboration): rejected");
+  CHECK(moduleA(mk(NODE_MOD_B,NODE_MOD_A,L_PEER_EVENT,BB1,3,MY_BOOT,K_AB,2))==ACCEPT, "Peer zone-2 event from B: accepted");
+  CHECK(moduleA(mk(NODE_MOD_B,NODE_MOD_A,L_PEER_EVENT,BB1,3,MY_BOOT,K_AB,2))==R_REPLAY, "Replayed peer event (fake corroboration): rejected");
   CHECK(moduleA(mk(NODE_MOD_B,NODE_MOD_A,L_PEER_ALARM,BB1,4,0x1234,K_AB))==R_STALE, "Old peer alarm from before A restarted: rejected");
   CHECK(moduleA(mk(NODE_MOD_B,NODE_MOD_A,L_PEER_ALARM,BB1,5,MY_BOOT,K_BGW))==R_SIG, "Peer alarm signed with wrong key: rejected");
   CHECK(moduleA(mk(NODE_GATEWAY,NODE_MOD_A,L_STATUS,G2,1,0,K_AGW))==R_REPLAY, "Gateway new boot without HELLO: rejected");
@@ -85,16 +86,97 @@ int main(){
     CHECK(fresh.accept(mk(NODE_GATEWAY,NODE_MOD_A,L_STATUS,G2,53,0,K_AGW))==TR_OK, "...and real traffic carries on"); }
 
 
-  printf("\n-- PC link (gateway <-> dongle) --\n");
+  printf("\n-- out-of-order and duplicate packets (relay copies) --\n");
+  { PeerTracker w; const uint32_t B = makeBootId(3, 0x77);
+    CHECK(w.accept(mk(NODE_MOD_C,NODE_MOD_A,L_HELLO,B,10,0,K_AB))==TR_SYNCED, "HELLO syncs");
+    CHECK(w.accept(mk(NODE_MOD_C,NODE_MOD_A,L_STATUS,B,14,0,K_AB))==TR_OK, "Packet 14 (13..11 lost or still on the relay)");
+    CHECK(w.accept(mk(NODE_MOD_C,NODE_MOD_A,L_STATUS,B,12,0,K_AB))==TR_LATE, "Packet 12 arrives late through the relay: accepted once");
+    CHECK(w.accept(mk(NODE_MOD_C,NODE_MOD_A,L_STATUS,B,12,0,K_AB))==TR_DUP, "...its second copy is a duplicate: dropped quietly");
+    CHECK(w.accept(mk(NODE_MOD_C,NODE_MOD_A,L_STATUS,B,14,0,K_AB))==TR_DUP, "Newest packet again (straight + relayed copy): dropped");
+    CHECK(w.accept(mk(NODE_MOD_C,NODE_MOD_A,L_STATUS,B,60,0,K_AB))==TR_OK, "Jump ahead to 60");
+    CHECK(w.accept(mk(NODE_MOD_C,NODE_MOD_A,L_STATUS,B,29,0,K_AB))==TR_LATE, "29 is 31 back: still inside the 32-packet window");
+    CHECK(w.accept(mk(NODE_MOD_C,NODE_MOD_A,L_STATUS,B,28,0,K_AB))==TR_REPLAY, "28 is 32 back: too old, refused as a replay");
+    CHECK(w.accept(mk(NODE_MOD_C,NODE_MOD_A,L_STATUS,B,14,0,K_AB))==TR_REPLAY, "An old recorded packet: refused"); }
+
+  printf("\n-- the site: zones and walls --\n");
+  CHECK(zonePartner(1,NODE_MOD_A)==NODE_MOD_D && zonePartner(1,NODE_MOD_D)==NODE_MOD_A, "Zone 1 = wall A-D");
+  CHECK(zonePartner(2,NODE_MOD_A)==NODE_MOD_B && zonePartner(2,NODE_MOD_B)==NODE_MOD_A, "Zone 2 = wall A-B");
+  CHECK(zonePartner(3,NODE_MOD_B)==NODE_MOD_C && zonePartner(3,NODE_MOD_C)==NODE_MOD_B, "Zone 3 = wall B-C");
+  CHECK(zonePartner(3,NODE_MOD_A)==NODE_NONE && zonePartner(4,NODE_MOD_C)==NODE_NONE, "A is not on wall B-C; there is no zone 4 (wall C-D)");
+  CHECK(zonesOf(NODE_MOD_A)==0b011 && zonesOf(NODE_MOD_B)==0b110, "A stands on zones 1+2, B on zones 2+3");
+  CHECK(zonesOf(NODE_MOD_C)==0b100 && zonesOf(NODE_MOD_D)==0b001, "C on zone 3, D on zone 1");
+  CHECK((zonesOf(NODE_MOD_A)&zoneBit(1)) && !(zonesOf(NODE_MOD_B)&zoneBit(1)), "Buzzers: zone 1 alarm sounds A, not B");
+  CHECK((zonesOf(NODE_MOD_B)&zoneBit(3)) && !(zonesOf(NODE_MOD_A)&zoneBit(3)), "Buzzers: zone 3 alarm sounds B, not A");
+  CHECK((zonesOf(NODE_MOD_A)&zoneBit(2)) && (zonesOf(NODE_MOD_B)&zoneBit(2)), "Buzzers: zone 2 alarm sounds A and B");
+
+  printf("\n-- the mesh: routes and relays --\n");
+  { static const uint8_t K_AC[32]={0xAC}, K_CG[32]={0xC9}, K_AD[32]={0xAD}, K_BG2[32]={0xB9};
+    static const uint8_t MA[6]={2,0,0,0,0,1}, MB[6]={2,0,0,0,0,2}, MC[6]={2,0,0,0,0,3}, MD[6]={2,0,0,0,0,4}, MG[6]={2,0,0,0,0,9};
+    // Module A's view
+    MeshPeer aG(NODE_GATEWAY,"Gateway",MG,K_AGW), aB(NODE_MOD_B,"Module B",MB,K_AB), aC(NODE_MOD_C,"Module C",MC,K_AC), aD(NODE_MOD_D,"Module D",MD,K_AD);
+    MeshPeer* aPeers[]={&aG,&aB,&aC,&aD}; Mesh meshA(NODE_MOD_A,aPeers,4);
+    // The gateway's view
+    MeshPeer gA(NODE_MOD_A,"Module A",MA,K_AGW), gB(NODE_MOD_B,"Module B",MB,K_BG2), gC(NODE_MOD_C,"Module C",MC,K_CG), gD(NODE_MOD_D,"Module D",MD,K_AD);
+    MeshPeer* gPeers[]={&gA,&gB,&gC,&gD}; Mesh meshG(NODE_GATEWAY,gPeers,4);
+    for (MeshPeer* P : gPeers) P->macSet = true;
+    g_millis = 100000;
+    // A hears G, B, D straight and they hear A; A and C can't hear each other.
+    for (MeshPeer* P : {&aG,&aB,&aD}) { P->directAt=g_millis; P->trk.online=true; P->rssi=-60; }
+    aG.theirMesh = meshBit(NODE_MOD_A)|meshBit(NODE_MOD_B)|meshBit(NODE_MOD_C)|meshBit(NODE_MOD_D);
+    aB.theirMesh = meshBit(NODE_MOD_A)|meshBit(NODE_GATEWAY)|meshBit(NODE_MOD_C);
+    aD.theirMesh = meshBit(NODE_MOD_A)|meshBit(NODE_GATEWAY);
+    aC.theirMesh = meshBit(NODE_MOD_B)|meshBit(NODE_MOD_D)|meshBit(NODE_GATEWAY); aC.trk.online=true;
+    CHECK(meshA.mask()==(meshBit(NODE_GATEWAY)|meshBit(NODE_MOD_B)|meshBit(NODE_MOD_D)), "A's mesh byte: hears G, B and D directly");
+    CHECK(meshA.directOk(aB) && !meshA.directOk(aC), "A-B works both ways; A-C does not");
+    CHECK(meshA.chooseRoute(aB)==0, "Packets for B go straight");
+    CHECK(meshA.chooseRoute(aC)==NODE_GATEWAY, "Packets for C go through the gateway (hears both, in the middle)");
+    aG.theirMesh &= ~meshBit(NODE_MOD_C);
+    CHECK(meshA.chooseRoute(aC)==NODE_MOD_B, "Gateway loses C too: through B instead");
+    aG.theirMesh |= meshBit(NODE_MOD_C);
+    CHECK(meshA.chooseRoute(aC)==NODE_MOD_B, "Gateway hears C again: stays with B while B works (no flapping)");
+    char net[6]; meshA.netText(net);
+    CHECK(strcmp(net,"*DbDD")==0, "A's status NET field: *DbDD (C relayed through b)");
+    aD.theirMesh = meshBit(NODE_GATEWAY);           // D stopped hearing A
+    CHECK(!meshA.directOk(aD), "One-way link (D no longer hears A): not used straight");
+    CHECK(meshA.chooseRoute(aD)==NODE_GATEWAY, "...relayed until both ways work");
+    aD.theirMesh |= meshBit(NODE_MOD_A);
+    CHECK(meshA.chooseRoute(aD)==0, "Both ways again: straight");
+    aB.cutUntil = g_millis + 60000;
+    CHECK(!meshA.hears(aB) && meshA.chooseRoute(aB)==NODE_GATEWAY, "Relay test: A-B cut for 60 s -> through the gateway");
+    g_millis += 61000; for (MeshPeer* P : {&aG,&aB,&aD}) P->directAt=g_millis;
+    CHECK(!meshA.isCut(aB) && meshA.chooseRoute(aB)==0, "Test over: straight again");
+    g_millis += 3000;
+    CHECK(meshA.mask()==0, "Nothing heard straight for 3 s: every direct link counts as down");
+
+    // A -> C through G: signed with the A-C key, which G does not hold
+    LinkPacket ac=mk(NODE_MOD_A,NODE_MOD_C,L_PEER_ALARM,BB1,7,0x5555,K_AC,0b010,0,3,"A-Z2 + B-Z2");
+    ac.via=NODE_GATEWAY; linkSign(K_AC,32,ac,ac.sig);
+    CHECK(meshG.forwardTo(ac,MA)==&gC, "Gateway passes A's packet on to C");
+    CHECK(verify(ac,K_AC), "C checks it with the A-C key: genuine, end to end");
+    LinkPacket t2=ac; t2.code=0; CHECK(!verify(t2,K_AC), "Relay changes the zones in transit: C rejects it");
+    t2=ac; t2.via=0; CHECK(!verify(t2,K_AC), "Relay pretends it came straight from A: C rejects it");
+    LinkPacket forged=mk(NODE_MOD_A,NODE_MOD_C,L_PEER_ALARM,BB1,8,0x5555,K_CG,0b001); forged.via=NODE_GATEWAY; linkSign(K_CG,32,forged,forged.sig);
+    CHECK(!verify(forged,K_AC), "Relay makes up an alarm 'from A' with its own key: C rejects it");
+    CHECK(meshG.forwardTo(ac,MB)==nullptr, "Copy that didn't come straight from A (MAC of B): not passed on");
+    LinkPacket other=ac; other.via=NODE_MOD_B; CHECK(meshG.forwardTo(other,MA)==nullptr, "Packet naming another relay: not passed on");
+    other=ac; other.dst=NODE_SERVER; CHECK(meshG.forwardTo(other,MA)==nullptr, "Relay to a board outside the mesh: refused");
+    other=ac; other.dst=NODE_MOD_A; CHECK(meshG.forwardTo(other,MA)==nullptr, "Sender = receiver: refused");
+    gC.cutUntil = g_millis + 10000; CHECK(meshG.forwardTo(ac,MA)==nullptr, "Relay test cuts G-C: G doesn't relay to C either"); gC.cutUntil = 0;
+    int passed=0; for (int i=0;i<100;i++) if (meshG.forwardTo(ac,MA)) passed++;
+    CHECK(passed>=39 && passed<=41, "Flood of 100 relay requests at once: only 40 passed on (rate limit)");
+    g_millis += 1000; CHECK(meshG.forwardTo(ac,MA)==&gC, "A second later: relaying again");
+    CHECK(sizeof(LinkPacket)==206, "Packet is 206 bytes (fits ESP-NOW's 250)"); }
+
+  printf("\n-- PC link (gateway <-> server) --\n");
   static const uint8_t K_PC[32] = {5,5,5};
   LinkPacket pc=mk(NODE_SERVER,NODE_GATEWAY,L_PC_CMD,BB1,1,0x6060,K_PC,CMD_DISARM,R_NONE);
-  pc.session=0x1234; pc.target=TARGET_BOTH; linkSign(K_PC,32,pc,pc.sig);
+  pc.session=0x1234; pc.target=TARGET_ALL; linkSign(K_PC,32,pc,pc.sig);
   CHECK(linkWellFormed(pc,sizeof(pc)), "PC command packet (type 13) is well-formed");
   v=pc; v.type=L_TYPE_MAX+1; CHECK(!linkWellFormed(v,sizeof(v)), "Type 14 rejected");
   CHECK(linkNeedsFreshness(L_PC_CMD) && linkNeedsFreshness(L_LOGIN_RESP), "PC commands and login answers are tied to the gateway's boot");
   CHECK(!linkNeedsFreshness(L_LOGIN_REQ), "Login request needs no boot binding (answered with a fresh challenge)");
   t=pc; t.session=0x1235; CHECK(!verify(t,K_PC), "Session ID changed in transit: rejected");
-  t=pc; t.target=NODE_MOD_A; CHECK(!verify(t,K_PC), "Target changed in transit (both -> A only): rejected");
+  t=pc; t.target=NODE_MOD_A; CHECK(!verify(t,K_PC), "Target changed in transit (all -> A only): rejected");
   CHECK(!verify(pc,K_AGW), "PC packet checked with a module key: rejected");
 
   printf("\n-- PC login (challenge-response) --\n");

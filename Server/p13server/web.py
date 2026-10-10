@@ -24,14 +24,16 @@ from aiohttp import WSMsgType, web
 from .config import SERVER_DIR, Config
 from .gateway import ROLE_NEEDED, USER_RE, GatewayLink, command_from_name
 from .hub import Hub
-from .protocol import TARGET_BOTH, Cmd, Node, Role, password_hash
+from .protocol import LETTER_NODES, TARGET_ALL, Cmd, Node, Role, password_hash
 from .store import Store
 
 log = logging.getLogger("p13.web")
 
 WEB_DIR = SERVER_DIR / "web"
 COOKIE = "p13_session"
-TARGETS = {"both": TARGET_BOTH, "A": Node.MOD_A, "B": Node.MOD_B, "gateway": Node.GATEWAY}
+TARGETS = {"all": TARGET_ALL, "A": Node.MOD_A, "B": Node.MOD_B, "C": Node.MOD_C, "D": Node.MOD_D,
+           "gateway": Node.GATEWAY}
+TEST_CUT_MAX = 300
 
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; "
        "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'")
@@ -274,13 +276,29 @@ class Dashboard:
             body = await request.json()
         except (json.JSONDecodeError, UnicodeDecodeError):
             return _error(400, "Expected JSON")
-        name, target_name = str(body.get("command", "")), str(body.get("target", "both"))
-        cmd, target = command_from_name(name), TARGETS.get(target_name)
+        name, target_name = str(body.get("command", "")), str(body.get("target", "all"))
+        cmd = command_from_name(name)
+        arg = 0
+        if cmd == Cmd.TEST_CUT:                     # relay test on one mesh link, e.g. "A-C" or "G-D"
+            ends = str(body.get("link", "")).upper().split("-")
+            if len(ends) != 2 or ends[0] == ends[1] or not all(e in LETTER_NODES for e in ends):
+                return _error(400, "Link must be two of A, B, C, D, G, like A-C")
+            try:
+                secs = int(body.get("seconds", 60))
+            except (TypeError, ValueError):
+                return _error(400, "Test time must be a number of seconds")
+            if not 0 <= secs <= TEST_CUT_MAX:
+                return _error(400, f"Test time must be 0 to {TEST_CUT_MAX} seconds")
+            here, there = sorted(ends, key=lambda e: e == "G")        # a module end first: the gateway
+            arg = (int(LETTER_NODES[there]) << 16) | secs                # handles its own links itself
+            target_name = f"{ends[0]}-{ends[1]}"
+            target = LETTER_NODES[here]
+        else:
+            target = TARGETS.get(target_name)
         if cmd is None or target is None:
             return _error(400, "Unknown command or target")
-        if target == Node.GATEWAY and cmd != Cmd.CLEAR_FAULT:
+        if target == Node.GATEWAY and cmd not in (Cmd.CLEAR_FAULT, Cmd.TEST_CUT):
             return _error(400, "Only a fault can be cleared on the gateway")
-        arg = 0
         if cmd == Cmd.MAINT_START:
             try:
                 arg = int(body.get("seconds", 300))
@@ -293,7 +311,8 @@ class Dashboard:
         if s.role < ROLE_NEEDED[cmd]:
             return _error(403, f"Needs the {ROLE_NEEDED[cmd].name.lower()} role")
         out = await self.link.command(cmd, target, arg, s.gw_session or 0)
-        detail = f"{name} on {target_name}" + (f" for {arg} s" if arg else "") + f": {out.text or out.result}"
+        secs = arg & 0xFFFF if cmd == Cmd.TEST_CUT else arg
+        detail = f"{name} on {target_name}" + (f" for {secs} s" if secs else "") + f": {out.text or out.result}"
         self._audit("COMMAND", s.user, request.remote or "-", detail, out.result)
         result = {"command": name, "target": target_name, "result": out.result, "text": out.text,
                   "by": s.user, "at": time.time()}
