@@ -1,4 +1,6 @@
-# Project 13: Gateway firmware (v6.0)
+# Project 13: Gateway firmware (v6.1)
+
+6.1: no change to what the gateway does, but it speaks link protocol version 5 (four zones), so **upload it again** together with the four modules.
 
 The control box: an ESP32 DevKit V1 (30-pin) on a 5 V adapter, with the RFID reader, 4×4 keypad, 16×2 LCD, a tamper switch and 3 LEDs (no buzzer). It sits in the middle of the site and is one of the five radios of the mesh with Modules A, B, C and D (ESP-NOW), and talks over Wi-Fi to the server laptop that runs the dashboard.
 
@@ -142,6 +144,7 @@ The RFID reader, keypad and LCD use the same pins as Board 1 before. The tamper 
 | T03 Lockout | 3 wrong tries | "LOCKED 60 s"; the keypad ignores input; the alarm keeps working |
 | T05 Intrusion | motion on A-Z2, then B-Z2, within 20 s | all four INTRUSION, A and B beep; gateway "!! INTRUSION !!", red LED |
 | Escalation | while in alarm: motion on C-Z3 once | log "Intrusion zone 3 (escalated)" |
+| Zone 4 | walk through the beam on wall C–D twice within 20 s | log "Intrusion zone 4: C-Z4 beam broken x2" |
 | Acknowledge | operator card, `1234#`, **3** | "ACK OK"; all go RECOVERY, then ARMED |
 | Role check | operator card, `1234#`, **4** | "Access denied, Needs MAINT card" (logged) |
 | T11 Maintenance | maintenance card, `9876#`, **4**, **3** | Module C "MAINT 300s"; gateway `C:MNT`. End with **6**, **3** |

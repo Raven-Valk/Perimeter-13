@@ -234,6 +234,17 @@ body[data-view="log"] .only-overview, body[data-view="overview"] .only-log { dis
 .fan.maint { fill: url(#hatch-warn); stroke: var(--warn); stroke-opacity: .6; stroke-dasharray: 4 3; }
 .fan.fault { fill: url(#hatch-alarm); stroke: var(--alarm); stroke-opacity: .6; stroke-dasharray: 4 3; }
 .fan.flash { animation: flash 1.4s ease-out 1; }
+/* v6.1: the IR beam on wall C-D. Same states as a PIR curtain, plus "broken" (a gap in the ray). */
+.beam .ray { stroke: var(--line); stroke-width: 1.6; stroke-dasharray: 1.5 5; stroke-opacity: .55; transition: stroke .4s; }
+.beam .ir-head { fill: var(--sheet); stroke: var(--line); stroke-width: 1.4; }
+.beam.on .ray, .legend .beam-key { stroke: var(--secure); stroke-opacity: .85; stroke-dasharray: 10 3 2 3; stroke-width: 1.8; }
+.beam.warn .ray { stroke: var(--warn); stroke-opacity: 1; stroke-dasharray: 10 3 2 3; stroke-width: 2.2; }
+.beam.alarm .ray { stroke: var(--alarm); stroke-opacity: 1; stroke-dasharray: none; stroke-width: 3; }
+.beam.maint .ray { stroke: var(--warn); stroke-opacity: .6; stroke-dasharray: 4 3; }
+.beam.fault .ray { stroke: var(--alarm); stroke-opacity: .6; stroke-dasharray: 2 7; }
+.beam.broken .ray { stroke-dasharray: 2 14; }
+.beam.flash .ray { animation: beamflash 1.4s ease-out 1; }
+@keyframes beamflash { 0% { stroke-width: 7; } 100% { } }
 @keyframes flash { 0% { fill-opacity: .7; } 100% { } }
 .hatch-warn-line { stroke: var(--warn); stroke-width: 1.2; stroke-opacity: .5; }
 .hatch-alarm-line { stroke: var(--alarm); stroke-width: .9; stroke-opacity: .65; }

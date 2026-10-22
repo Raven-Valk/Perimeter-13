@@ -2,9 +2,12 @@
 # Runs the PC-side tests (Linux / macOS / WSL; needs g++, python3 and OpenSSL).
 set -e
 cd "$(dirname "$0")"
-cp ../SensorModule/link_protocol.h ../SensorModule/mesh.h .
+cp ../SensorModule/link_protocol.h ../SensorModule/mesh.h ../SensorModule/beam.h .
 g++ -std=c++17 -I. -o protocol_tests protocol_tests.cpp -lcrypto
 ./protocol_tests
+# The IR beam on wall C-D (v6.1)
+g++ -std=c++17 -I. -o beam_tests beam_tests.cpp
+./beam_tests
 # Log recovery: tests the gateway's real LineWindow code, pulled out of Gateway.ino
 python3 - << 'PY'
 s=open('../Gateway/Gateway.ino').read()

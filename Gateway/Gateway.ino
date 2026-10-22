@@ -1,6 +1,6 @@
 // =====================================================================
 //  PINNACLE 1 — PROJECT 13 — SECURE PERIMETER INTRUSION DETECTION
-//  GATEWAY  —  ESP32 DevKit V1 30-pin  —  firmware v6.0
+//  GATEWAY  —  ESP32 DevKit V1 30-pin  —  firmware v6.1
 //
 //  The control box, in the middle of the site. Runs on a power adapter; one of
 //  the five radios of the mesh (mesh.h) with Sensor Modules A, B, C and D at the

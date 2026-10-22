@@ -8,6 +8,7 @@ The version numbers here are the final ones. During development some versions ha
 
 | Version | Date | What changed | Working name |
 |---|---|---|---|
+| [`v6.1`](#v61) | 2026-10-22 | zone 4 on wall C-D with an IR beam, buzzers on C and D | v6.1 |
 | [`v6`](#v6) | 2026-10-10 | four modules in a full mesh with relay, three walled zones, new dashboard | v6 |
 | [`v5`](#v5) | 2026-10-10 | gateway on Wi-Fi (MQTT over TLS) + server and dashboard website | v5.4 |
 | [`v4.3`](#v43) | 2026-10-09 | built-in pull-ups instead of resistors, new pin map, wiring diagrams | v5.3 |
@@ -18,6 +19,40 @@ The version numbers here are the final ones. During development some versions ha
 | [`v3`](#v3) | 2026-10-06 | one controller board with both PIRs + listen-only gateway to the PC | Pinnacle13_Firmware_v4 (first) |
 | [`v2`](#v2) | 2026-10-06 | teammate's single-board draft (draft2.ino) | draft2.ino |
 | [`v1`](#v1) | 2026-10-05 | two-node firmware (main controller + sensor node over ESP-NOW) | Pinnacle13_Firmware |
+
+## v6.1
+
+*2026-10-22* · zone 4 on wall C-D with an IR beam, buzzers on C and D
+
+Wall C-D becomes zone 4, protected by one infrared beam between modules D and C. Modules C and D get a buzzer, and the dashboard shows the new zone.
+
+**Zone 4 (wall C-D)**
+
+- Two IR-08H modules: D sends (EN on GPIO 19, 1 ms bursts every 10 ms from the ESP32's LEDC), C receives (OUT on GPIO 19, counted by an interrupt).
+- One break = warning (P1); two breaks within 20 s = intrusion in zone 4; a break during an active intrusion adds zone 4 at once.
+- Breaks less than 2 s apart count as one crossing.
+- Beam blocked for 30 s, OUT held LOW, or no signal from D = fault (P3), like a stuck PIR; the module won't arm with it.
+- Beam logic in SensorModule/beam.h (plain C++, tested on a PC).
+
+**Buzzers**
+
+- 3-pin buzzer module on GPIO 16 of C and D. Zone 1 sounds A + D, zone 2 A + B, zone 3 B + C, zone 4 C + D.
+
+**Protocol v5**
+
+- Four zones (zone bits 0x0F); C tells D about a break with the normal wall-partner event for zone 4. All five boards must run 6.1.
+- Status: C reports IR:OK/BRK/WARMUP/STUCK/NOSIG, D reports IR:TX.
+
+**Dashboard**
+
+- Zone 4 on the site plan: the beam along wall C-D, tags C-Z4 and D-IR, buzzers at C and D.
+- New 'IR beam' row in the Units table; warnings and notifications for the beam.
+
+**Tests, Wokwi and docs**
+
+- beam_tests.cpp (17 checks), zone 4 checks in the protocol tests, 5 new server tests.
+- Wokwi: C has a 'Break IR beam' button, D an LED for the sender; buzzers on C and D.
+- New C/D wiring diagram with the IR-08H and the buzzer.
 
 ## v6
 

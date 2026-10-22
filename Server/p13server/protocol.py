@@ -20,7 +20,7 @@ import struct
 from dataclasses import dataclass, field
 from enum import IntEnum
 
-LINK_VERSION = 4
+LINK_VERSION = 5                # 5 = firmware 6.1 (four zones)
 SIG_LEN = 8
 TEXT_MAX = 160
 
@@ -90,9 +90,14 @@ NODE_LETTERS = {Node.MOD_A: "A", Node.MOD_B: "B", Node.MOD_C: "C", Node.MOD_D: "
 LETTER_NODES = {v: k for k, v in NODE_LETTERS.items()}
 MESH_ORDER = "ABCDG"          # the order of the NET:xxxxx status field
 
-# The site: zone n = a wall with a PIR at each end (firmware ZONE_END1/2)
-ZONES = {1: ("A", "D"), 2: ("A", "B"), 3: ("B", "C")}
-BUZZERS = ("A", "B")          # modules with a buzzer: they sound for alarms on their walls
+# The site (firmware ZONE_END1/2): zones 1-3 = a wall with a PIR at each end, zone 4 = wall C-D with the IR beam
+ZONES = {1: ("A", "D"), 2: ("A", "B"), 3: ("B", "C"), 4: ("D", "C")}   # zone 4 = wall C-D, the IR beam (6.1)
+BUZZERS = ("A", "B", "C", "D")  # every module has a buzzer (C and D since 6.1): it sounds for alarms on its walls
+# v6.1: zone 4 has no PIRs, only an infrared beam along wall C-D (D sends, C receives).
+# One break = warning, two within 20 s = intrusion.
+BEAM_TX, BEAM_RX = "D", "C"
+BEAM_ZONE = 4
+BEAM_NAME = "C-Z4"             # its name in log lines (zone column) and on the dashboard
 
 
 def zones_of(module: str) -> list[int]:
@@ -291,7 +296,7 @@ def parse_net(text: str) -> dict[str, str]:
 
 def zone_digits(text: str) -> list[int]:
     """'1+3' or '13' -> [1, 3]; '-' -> []."""
-    return sorted({int(c) for c in text if c.isdigit() and 1 <= int(c) <= 3})
+    return sorted({int(c) for c in text if c.isdigit() and 1 <= int(c) <= len(ZONES)})
 
 
 def parse_log_line(line: str) -> dict[str, str] | None:

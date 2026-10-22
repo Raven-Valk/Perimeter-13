@@ -5,9 +5,9 @@ import { ago, eventTime, when } from "./dom.js";
 import { linkName, meshLinks, NAME } from "./mesh.js";
 
 export const MODULES = ["A", "B", "C", "D"];
-export const WALL = { 1: "A\u2060–\u2060D", 2: "A\u2060–\u2060B", 3: "B\u2060–\u2060C" };   // never split across lines
-const ENDS = { 1: ["A", "D"], 2: ["A", "B"], 3: ["B", "C"] };
-const BUZZERS = { A: [1, 2], B: [2, 3] };          // modules with a buzzer, and the zones they sound for
+export const WALL = { 1: "A\u2060–\u2060D", 2: "A\u2060–\u2060B", 3: "B\u2060–\u2060C", 4: "C\u2060–\u2060D" };   // never split across lines
+const ENDS = { 1: ["A", "D"], 2: ["A", "B"], 3: ["B", "C"], 4: ["D", "C"] };   // zone 4: the IR beam (6.1)
+const BUZZERS = { A: [1, 2], B: [2, 3], C: [3, 4], D: [1, 4] };   // every module has a buzzer (v6.1); the zones it sounds for
 
 export function moduleState(n) {
   if (!n || n.state === undefined) return "unknown";
@@ -16,7 +16,7 @@ export function moduleState(n) {
 }
 
 /** [1, 3] from "1+3" / "13" / "-" */
-export const zonesIn = (text) => [...new Set(String(text || "").match(/[1-3]/g) || [])].map(Number).sort();
+export const zonesIn = (text) => [...new Set(String(text || "").match(/[1-4]/g) || [])].map(Number).sort();
 
 /** "A", "A and B", "A, B and D", "all four modules" */
 export function list(keys, noun = true) {
@@ -30,7 +30,7 @@ const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 
 /** The PIR at the other end of the wall: partner("A-Z1") = "D-Z1" */
 export function partnerPir(name) {
-  const m = /^([A-D])-Z([1-3])$/.exec(name || "");
+  const m = /^([A-D])-Z([1-3])$/.exec(name || "");     // zones 1-3 only: zone 4 is one beam
   if (!m) return null;
   const other = ENDS[m[2]].find((k) => k !== m[1]);
   return `${other}-Z${m[2]}`;
@@ -124,22 +124,29 @@ export function posture(st) {
   const radio = meshNote(st);
   if (armed.length === 4) {
     if (mods.some((m) => Number(m.n.priority) === 1)) {
-      const e = latest(events, (e) => e.type === "ALERT" && e.priority === 1 && /^[A-D]-Z[1-3]$/.test(e.zone || ""));
+      const e = latest(events, (e) => e.type === "ALERT" && e.priority === 1 && /^[A-D]-Z[1-4]$/.test(e.zone || ""));
+      if (e && e.zone === "C-Z4") {
+        return { level: "warn", title: "Armed. The beam on zone 4, wall C\u2060–\u2060D, was broken once.",
+                 detail: `A second break within 20 seconds confirms an intrusion.${radio}` };
+      }
       const pirName = e ? e.zone : null;
       const zone = pirName ? Number(pirName.slice(-1)) : null;
       const where = pirName ? `${pirName}, wall ${WALL[zone]}` : "a wall";
       return { level: "warn", title: `Armed. Motion at ${where}, not confirmed.`,
                detail: `One sensor fired. ${pirName ? `${partnerPir(pirName)}, at the other end of the wall,` : "The sensor at the other end of the wall"} within 20 seconds, or 3 hits, confirms an intrusion.${radio}` };
     }
-    const e = latest(events, (e) => e.type === "ALERT" && /^[A-D]-Z[1-3]$/.test(e.zone || ""));
+    const e = latest(events, (e) => e.type === "ALERT" && /^[A-D]-Z[1-4]$/.test(e.zone || ""));
+    const beamBad = ["STUCK", "NOSIG"].includes((nodes.C || {}).IR);
     return { level: "quiet", title: "Armed. The perimeter is quiet.",
-             detail: (e ? `Last motion: ${e.zone} at ${when(eventTime(e), false)}, ${ago(eventTime(e))}.` : "No motion recorded yet.") + radio };
+             detail: (beamBad ? "The beam on wall C\u2060–\u2060D has a fault. " : "") +
+                     (e ? `Last motion: ${e.zone === "C-Z4" ? "the zone 4 beam" : e.zone} at ${when(eventTime(e), false)}, ${ago(eventTime(e))}.` : "No motion recorded yet.") + radio };
   }
   if (inState("DISARMED").length === 4) {
     return { level: "quiet", title: "Disarmed.", detail: `Sensors still log motion, but nothing raises an alarm.${radio}` };
   }
   const others = MODULES.filter((k) => !armed.includes(k));
-  const watched = Object.entries(ENDS).filter(([, ends]) => ends.some((k) => armed.includes(k))).map(([z]) => z);
+  const watched = Object.entries(ENDS).filter(([z, ends]) => (z === "4" ? armed.includes("C") : ends.some((k) => armed.includes(k))))
+    .map(([z]) => z);                              // zone 4 is watched by C alone (the beam receiver)
   return { level: "warn", title: `${cap(list(armed))} armed; ${list(others, false)} not.`,
            detail: watched.length ? `Watched: zone ${watched.join(", ")}. A zone with one armed end only warns, it can still confirm by 3 hits.${radio}`
                                   : `No zone is watched.${radio}` };

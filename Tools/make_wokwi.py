@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Builds the single-file Wokwi sketches from the real firmware.
 
-Wokwi projects are easiest as one sketch.ino, so link_protocol.h, mesh.h and
-secrets.h are pasted into it, and the simulator switches are turned on. One
+Wokwi projects are easiest as one sketch.ino, so link_protocol.h, mesh.h,
+secrets.h (and beam.h for the modules) are pasted into it, and the simulator switches are turned on. One
 sketch per board: Gateway, SensorModule_A .. SensorModule_D. Run this after
 changing the firmware:
 
-  python3 Tools/make_wokwi.py            (writes ../Pinnacle13_v6_Wokwi/*/sketch.ino)
+  python3 Tools/make_wokwi.py            (writes ../Pinnacle13_v6.1_Wokwi/*/sketch.ino)
 """
 
 import re
@@ -18,7 +18,10 @@ OUT = ROOT.parent / f"{ROOT.name}_Wokwi"
 
 
 def inline(sketch: str, folder: Path) -> str:
-    for name in ("link_protocol.h", "mesh.h", "secrets.h"):
+    names = ["link_protocol.h", "mesh.h", "secrets.h"]
+    if (folder / "beam.h").exists():
+        names.append("beam.h")                     # v6.1: the IR beam (modules only)
+    for name in names:
         body = (folder / name).read_text()
         body = "\n".join(l for l in body.splitlines()
                          if l.strip() != "#pragma once" and l.strip() != '#include "link_protocol.h"')

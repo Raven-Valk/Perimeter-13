@@ -30,7 +30,7 @@ For a faster demo: `P13_EMULATOR_INTERVAL=8 P13_EMULATOR_CONFIRM=1 python3 -m p1
 
 The **☰ menu** (top left) opens a side drawer:
 
-- **Overview:** the plan of the site — the four modules at the corners and the gateway in the middle, the PIR curtains on the **outside** of walls A–D, A–B and B–C, the 10 radio links (solid = direct, dashed amber = relayed, with the way round drawn through the relay), and which buzzers are sounding. Next to it, the controls.
+- **Overview:** the plan of the site — the four modules at the corners and the gateway in the middle, the PIR curtains on the **outside** of walls A–D, A–B and B–C (zones 1–3), the IR beam along wall C–D (zone 4, tag C-Z4: green = intact, amber = broken once, red = zone 4 in alarm, dotted red = beam fault), the 10 radio links (solid = direct, dashed amber = relayed, with the way round drawn through the relay), and which buzzers are sounding. Next to it, the controls.
 - **Log:** the event log with filters and search, the units table (gateway + A–D), and link integrity (each of the 10 links, the server link, refused packets, the server's own audit).
 - **Alerts on this device:** browser **notifications** for intrusions and (optionally) warnings, and a loud **siren** on an intrusion that keeps sounding until the alarm is acknowledged or you press **Silence**. A new zone joining the alarm sounds it again. Settings are kept in this browser only. Notifications need the HTTPS address (or 127.0.0.1); browsers only play sound after you've clicked once on the page.
 - **Account:** who is signed in, and Sign out.

@@ -1,6 +1,6 @@
 // =====================================================================
 //  PINNACLE 1 — PROJECT 13 — SECURE PERIMETER INTRUSION DETECTION
-//  SENSOR MODULE  (A, B, C or D)  —  ESP32 DevKitC 38-pin (WROOM-32)  —  firmware v6.0
+//  SENSOR MODULE  (A, B, C or D)  —  ESP32 DevKitC 38-pin (WROOM-32)  —  firmware v6.1
 //
 //  Four of these sit at the corners of the site, the gateway in the middle:
 //
@@ -8,14 +8,23 @@
 //        |                  |        ends, on the OUTSIDE face of the wall, looking
 //     zone 1      G      zone 3      along it. Set each HC-SR501 to low sensitivity
 //        |                  |        and range (see README) so it only sees the
-//        D -----(none)----- C        strip just outside the wall.
+//        D ~~~~ zone 4 ~~~~~ C        strip just outside the wall.
 //
 //    A: PIRs A-Z1 (wall A-D) + A-Z2 (wall A-B), tamper reed, LCD, keypad, buzzer, 3 LEDs
 //    B: PIRs B-Z2 (wall A-B) + B-Z3 (wall B-C), tamper reed, LCD, keypad, buzzer, 3 LEDs
-//    C: PIR  C-Z3 (wall B-C), LCD, keypad           } low-cost corners: tamper switch
-//    D: PIR  D-Z1 (wall A-D), LCD, keypad           } and LEDs optional, no buzzer
+//    C: PIR  C-Z3 (wall B-C), beam C-Z4 = IR RECEIVER (wall C-D), 3-pin buzzer, LCD, keypad
+//    D: PIR  D-Z1 (wall A-D), IR SENDER for the beam (wall C-D),   3-pin buzzer, LCD, keypad
+//       (C and D: tamper switch and LEDs optional)
 //
-//  Confirmed intrusion (P2) when, within 20 s:
+//  v6.1 — zone 4, wall C-D: one infrared beam and no PIRs (beam.h). D's IR-08H
+//  sends short bursts of 38 kHz infrared along the outside of the wall, C's
+//  IR-08H receives them. With one sensor on the wall:
+//    * beam broken once                        -> warning (P1)
+//    * beam broken twice within 20 s           -> intrusion, zone 4
+//    * beam broken during an active intrusion  -> zone 4 joins the alarm at once
+//  Beam blocked for 30 s, or no signal from D at all = a FAULT (like a stuck PIR).
+//
+//  Zones 1-3: confirmed intrusion (P2) when, within 20 s:
 //    * both PIRs of one wall fire (this module's and the module's at the other end), or
 //    * both PIRs of this module fire (A or B: someone at the corner), or
 //    * one PIR fires 3 times.
@@ -23,7 +32,7 @@
 //  While an intrusion is active (not yet acknowledged), the 20 s / 3-hit rules are
 //  off: ANY PIR firing anywhere is at once an intrusion in its zone.
 //  On P2 every armed module goes to INTRUSION; the buzzer sounds on each module
-//  standing on a wall in alarm (zone 1 -> A, zone 2 -> A + B, zone 3 -> B).
+//  standing on a wall in alarm (zone 1 -> A + D, zone 2 -> A + B, zone 3 -> B + C, zone 4 -> C + D).
 //
 //  Who controls what:
 //    * Arm / disarm / maintenance: ONLY by signed commands from the gateway
@@ -67,6 +76,10 @@
 #define CD_LED_YELLOW    1   // 1 = LED on pin 2. Many ESP32 boards already have a small LED on
                              //     pin 2, so this works with nothing added.
 #define CD_LED_RED       0   // 1 = red LED on pin 15
+#define CD_BUZZER_FITTED 1   // 1 = 3-pin buzzer module (VCC, GND, I/O) on pin 16, as on A and B
+#define CD_BUZZER_ACTIVE_LOW 0  // 1 if C/D's buzzer module beeps when its I/O pin is LOW
+                             //     (many 3-pin modules do: it beeps at power-on and goes quiet in an alarm)
+#define BEAM_FITTED      1   // 1 = zone 4, IR beam on wall C-D: D's IR-08H sends, C's IR-08H receives (pin 19)
 // With fewer than three LEDs the ones fitted take over: an alarm or fault
 // blinks fast, a warning blinks slowly, armed and all well = steady.
 
@@ -88,7 +101,7 @@ struct PinUser;
 
 // ======== link_protocol.h (inlined for Wokwi: no extra files needed) ========
 // =====================================================================
-//  link_protocol.h  —  v4 (firmware 6.0), shared by every part of Project 13:
+//  link_protocol.h  —  v4 (firmware 6.1), shared by every part of Project 13:
 //    Sensor Modules A, B, C, D, the Gateway, and the server (Server/p13server/protocol.py
 //    is the same format in Python). Keep this file IDENTICAL in every sketch folder.
 //
@@ -119,8 +132,8 @@ struct LinkPacket;
 struct MeshPeer;      // mesh.h
 class Mesh;
 
-#define LINK_VERSION    4
-#define FIRMWARE_VERSION "6.0"
+#define LINK_VERSION    5   // 5 = firmware 6.1: four zones (zone 4 = the IR beam on wall C-D)
+#define FIRMWARE_VERSION "6.1"
 #define ESPNOW_DEFAULT_CHANNEL 1  // until the gateway's Wi-Fi decides: the gateway uses its
                                   // network's channel and the modules find it by themselves
 #define SIG_LEN         8      // bytes of HMAC-SHA256 kept in each packet
@@ -133,24 +146,26 @@ class Mesh;
 //   p13/<SITE_ID>/to/G  and  p13/<SITE_ID>/to/P   (see Gateway/secrets.h).
 #define MQTT_BROKER      "broker.hivemq.com"
 #define MQTT_PORT        1883
-#define MQTT_TOPIC_BASE  "pinnacle13/p13-2d386efc/v6"
+#define MQTT_TOPIC_BASE  "pinnacle13/p13-2d386efc/v61"
 
 enum LinkNode : uint8_t { NODE_NONE = 0, NODE_MOD_A = 1, NODE_MOD_B = 2, NODE_MOD_C = 3, NODE_MOD_D = 4,
                          NODE_GATEWAY = 9, NODE_SERVER = 10 };
 inline bool isModule(uint8_t n) { return n >= NODE_MOD_A && n <= NODE_MOD_D; }
 
 // ---------------- the site: a rectangle, modules at the corners ----------------
-//        A ---- zone 2 ---- B          Each protected wall (zone) has a PIR at
-//        |                  |          both ends, mounted on the OUTSIDE face
-//     zone 1      G      zone 3        and looking along it (a "curtain").
-//        |                  |          Wall C-D has no sensors.
-//        D -----(none)----- C          G = gateway, in the middle.
+//        A ---- zone 2 ---- B          Zones 1-3: a PIR at both ends of the
+//        |                  |          wall, on the OUTSIDE face, looking
+//     zone 1      G      zone 3        along it (a "curtain").
+//        |                  |          Zone 4 (v6.1): one infrared beam along
+//        D ~~~~ zone 4 ~~~~ C          wall C-D, D sends, C receives. G = gateway.
 //  Zone 1 = wall A-D (PIRs "A-Z1", "D-Z1"), zone 2 = wall A-B ("A-Z2", "B-Z2"),
-//  zone 3 = wall B-C ("B-Z3", "C-Z3"). A and B have buzzers: an intrusion in a
-//  zone sounds the buzzer of each module on that wall that has one.
-const uint8_t SITE_ZONES = 3;
-const uint8_t ZONE_END1[SITE_ZONES + 1] = { 0, NODE_MOD_A, NODE_MOD_A, NODE_MOD_B };
-const uint8_t ZONE_END2[SITE_ZONES + 1] = { 0, NODE_MOD_D, NODE_MOD_B, NODE_MOD_C };
+//  zone 3 = wall B-C ("B-Z3", "C-Z3"), zone 4 = wall C-D (beam "C-Z4", seen by C).
+//  Every module has a buzzer (C and D since v6.1): an intrusion in a zone sounds
+//  the buzzer of each module on that wall.
+const uint8_t SITE_ZONES = 4;
+const uint8_t ZONE_END1[SITE_ZONES + 1] = { 0, NODE_MOD_A, NODE_MOD_A, NODE_MOD_B, NODE_MOD_D };
+const uint8_t ZONE_END2[SITE_ZONES + 1] = { 0, NODE_MOD_D, NODE_MOD_B, NODE_MOD_C, NODE_MOD_C };
+const uint8_t ALL_ZONES  = (1 << SITE_ZONES) - 1;      // zone bits 0x0F
 inline uint8_t zoneBit(uint8_t z) { return z >= 1 && z <= SITE_ZONES ? 1 << (z - 1) : 0; }
 inline uint8_t zonePartner(uint8_t z, uint8_t me) {      // the module at the other end of zone z's wall
   if (!zoneBit(z)) return NODE_NONE;
@@ -162,6 +177,16 @@ inline uint8_t zonesOf(uint8_t node) {                  // the walls a module st
   return m;
 }
 
+// v6.1: zone 4 is an infrared beam along wall C-D, just outside it. D's IR module
+// sends, C's receives (beam.h). It is the only sensor on that wall, so:
+//   beam broken once                          -> warning (P1)
+//   beam broken twice within 20 s             -> intrusion, zone 4
+//   beam broken while an intrusion is active  -> zone 4 joins the alarm at once
+// C tells D (the other end of the wall) with an ordinary L_PEER_EVENT, code 4.
+const uint8_t BEAM_TX_NODE = NODE_MOD_D;
+const uint8_t BEAM_RX_NODE = NODE_MOD_C;
+const uint8_t BEAM_ZONE    = 4;
+
 enum LinkType : uint8_t {
   L_HELLO      = 1,  // status beat that also says "this is my boot ID". At boot and every 10th beat.
   L_STATUS     = 2,  // status beat, every second: state, priority, health in text
@@ -169,6 +194,7 @@ enum LinkType : uint8_t {
   L_ACK        = 4,  // gateway -> module: reply to each status beat ("link alive").
                      //   HELLO / ACK from the gateway: code = its radio channel (0 = not said)
   L_PEER_EVENT = 5,  // module -> module at the other end of the wall: my PIR on zone `code` fired (arg = age in ms)
+                     //   (code 4: C -> D, the beam on wall C-D was broken)
   L_PEER_ALARM = 6,  // module -> the other modules: intrusion confirmed, alarm everyone
                      //   (code = zones in alarm (bits), arg = alarm no., text = why)
   L_CMD        = 7,  // gateway -> module: command (code = Cmd, role, arg, text = "user@source")
@@ -451,7 +477,7 @@ inline bool notYet(uint32_t t) { return (int32_t)(t - millis()) > 0; }
 // ======== end of link_protocol.h ========
 // ======== mesh.h (inlined for Wokwi: no extra files needed) ========
 // =====================================================================
-//  mesh.h  —  the radio mesh (firmware 6.0). IDENTICAL in Gateway/ and SensorModule/.
+//  mesh.h  —  the radio mesh (firmware 6.1). IDENTICAL in Gateway/ and SensorModule/.
 //
 //  Five radios: modules A, B, C, D and the gateway. Each one talks straight to
 //  the other four (a full mesh: 10 links, each with its own key).
@@ -721,6 +747,159 @@ static const PinUser USERS[] = {
 };
 static const uint8_t USER_COUNT = sizeof(USERS) / sizeof(USERS[0]);
 // ======== end of secrets.h ========
+// ======== beam.h (inlined for Wokwi: no extra files needed) ========
+// =====================================================================
+//  beam.h  —  the infrared beam along wall C-D (firmware 6.1)
+//
+//  Hardware: two IR-08H modules (4 pins: EN, OUT, +, GND). Each has an IR LED
+//  driven at 38 kHz by a 555 timer (it only runs while EN is HIGH) and an
+//  HS0038 receiver that pulls OUT LOW while it sees 38 kHz infrared.
+//    * D, transmitter: jumper OFF, EN -> GPIO 19. The firmware switches the
+//      555 on in short bursts with the ESP32's LEDC hardware (no CPU time).
+//    * C, receiver:    jumper OFF, EN -> GND (its own LED stays dark), OUT -> GPIO 19.
+//      Power both modules from 3.3 V: OUT then never goes above 3.3 V.
+//  D's LED points along the outside of wall C-D at C's receiver. The beam is
+//  zone 4, the only sensor on that wall: 2 breaks within 20 s = intrusion.
+//
+//  Why bursts and not a steady beam: the HS0038 treats infrared that never
+//  stops as background light and stops reporting it after a moment. Bursts of
+//  1 ms every 10 ms are what it is built for, and each one gives C a short LOW
+//  pulse on OUT. So:
+//      beam intact  -> C sees about 10 short pulses every 100 ms
+//      beam broken  -> no pulses (OUT stays HIGH)
+//      OUT stuck LOW for a second or more -> wiring fault
+//
+//  This file is plain C++ with no Arduino calls, so tests/beam_tests.cpp can
+//  check it on a PC. In the firmware a tiny interrupt counts the pulses and
+//  the main loop hands the count to the tracker (sync()).
+// =====================================================================
+#include <stdint.h>
+
+const uint32_t BEAM_PERIOD_MS   = 10;      // D: one burst every 10 ms (100 Hz) ...
+const uint32_t BEAM_BURST_MS    = 1;       // ... of 1 ms (about 38 cycles of 38 kHz)
+const uint32_t BEAM_WINDOW_MS   = 100;     // C counts pulses per 100 ms window
+const uint8_t  BEAM_EXPECTED    = BEAM_WINDOW_MS / BEAM_PERIOD_MS;   // 10 pulses per window
+const uint32_t BEAM_GAP_MS      = 60;      // no pulse for this long = broken (6 bursts missed)
+const uint32_t BEAM_GRACE_MS    = 5000;    // after start-up: this long to find the signal, else NOSIG
+const uint32_t BEAM_STUCK_MS    = 30000;   // broken this long = blocked or D down: a FAULT, like a stuck PIR
+const uint32_t BEAM_LOW_STUCK_MS = 1000;   // OUT held LOW this long = shorted wire / receiver fault
+const uint32_t BEAM_MERGE_MS    = 2000;    // breaks this close together are one crossing (two legs, a bag...)
+const uint8_t  BEAM_REPEATS     = 2;       // separate breaks within 20 s that confirm an intrusion (zone 4)
+
+// Beam health, same numbers as link_protocol.h Health: OK / WARMUP / STUCK / OFFLINE
+enum BeamHealth : uint8_t { BH_OK = 0, BH_WARMUP = 1, BH_STUCK = 2, BH_NOSIG = 3 };
+
+inline const char* beamHealthName(uint8_t h) {
+  switch (h) { case BH_OK: return "OK"; case BH_WARMUP: return "WARMUP"; case BH_STUCK: return "STUCK"; default: return "NO SIGNAL"; }
+}
+
+class BeamTracker {
+public:
+  // One falling edge on OUT (a burst from D arrived). Used by the tests.
+  void pulse(uint32_t nowMs) { lastPulse = nowMs; pulses++; everPulsed = true; }
+
+  // The firmware: the interrupt's running pulse count and the time of the last one.
+  void sync(uint32_t lastPulseMs, uint32_t pulseCount) {
+    if (pulseCount != pulses) { pulses = pulseCount; lastPulse = lastPulseMs; everPulsed = true; }
+  }
+
+  // Wokwi has no infrared: the simulator calls this every loop pass while the
+  // "beam" button is not pressed, as if D's bursts were arriving.
+  void fakeSignal(uint32_t nowMs) {
+    if (!everPulsed || nowMs - fakeAt > 1000) fakeAt = nowMs;          // (re)start the fake bursts
+    while (nowMs - fakeAt >= BEAM_PERIOD_MS) { fakeAt += BEAM_PERIOD_MS; pulses++; }
+    lastPulse = nowMs; everPulsed = true;
+  }
+
+  // Every loop pass. outLow = the OUT pin reads LOW right now.
+  void update(uint32_t nowMs, bool outLow) {
+    if (!started) { started = true; startedAt = nowMs; windowStart = nowMs; windowCount = pulses; }
+    if (nowMs - windowStart >= BEAM_WINDOW_MS) {          // close the counting window
+      lastWindowPulses = (uint16_t)(pulses - windowCount);
+      lastWindowMs = (uint16_t)(nowMs - windowStart);   // 100-150 ms: the loop isn't exactly regular
+      windowCount = pulses;
+      windowStart = nowMs;
+    }
+    // Stuck LOW = OUT reads LOW *and* no burst edge for a second. (Reading LOW on
+    // its own proves nothing: each good burst holds OUT LOW for 1 ms, and a loop
+    // that happens to run in step with D's 10 ms bursts could catch it every time.)
+    bool lowStuck = outLow && nowMs - lastPulse >= BEAM_LOW_STUCK_MS;
+
+    bool ok = everPulsed && !lowStuck && signalValid(nowMs);
+    if (ok) {                                             // intact (again, or for the first time)
+      intactNow = true;
+      health = BH_OK;
+      return;
+    }
+    if (intactNow) {                                      // it just broke
+      intactNow = false;
+      brokenSince = nowMs;
+      if (health == BH_OK && (!eventAt || nowMs - eventAt >= BEAM_MERGE_MS)) {   // a new crossing
+        eventPending = true;
+        eventAt = nowMs ? nowMs : 1;
+      }
+    }
+    if (lowStuck) { health = BH_STUCK; return; }
+    if (!everPulsed) { health = nowMs - startedAt < BEAM_GRACE_MS ? BH_WARMUP : BH_NOSIG; return; }
+    if (nowMs - brokenSince >= BEAM_STUCK_MS) health = BH_STUCK;
+  }
+
+  // ------------------------------------------------------------------
+  //  Is what C receives right now really D's beam?  (only asked once at
+  //  least one pulse has arrived since start-up)
+  //  nowMs - lastPulse = how long since the most recent pulse (ms)
+  //  lastWindowPulses  = pulses counted in the last complete window ...
+  //  lastWindowMs      = ... which lasted this long (100 ms or a bit more)
+  //  BEAM_PERIOD_MS    = D sends one burst every 10 ms, so expect lastWindowMs / 10
+  //  true = intact. false for long enough (BEAM_GAP_MS) = a break.
+  // ------------------------------------------------------------------
+  bool signalValid(uint32_t nowMs) const {
+    // TODO(team): decide how strict this check is. See README "Beam check".
+    return nowMs - lastPulse < BEAM_GAP_MS;
+  }
+
+  bool intact() const { return intactNow; }
+  bool faulty() const { return health == BH_STUCK || health == BH_NOSIG; }
+  bool warming() const { return health == BH_WARMUP; }
+  const char* stateText() const {                         // status field IR:
+    switch (health) {
+      case BH_OK:     return intactNow ? "OK" : "BRK";
+      case BH_WARMUP: return "WARMUP";
+      case BH_STUCK:  return "STUCK";
+      default:        return "NOSIG";
+    }
+  }
+  const char* healthText() const { return beamHealthName(health); }
+
+  // Break history: the last BEAM_REPEATS break times (same idea as a PIR's).
+  void addTrigger(uint32_t t) {
+    if (trigN < BEAM_REPEATS) { trig[trigN++] = t; return; }
+    for (uint8_t i = 0; i + 1 < BEAM_REPEATS; i++) trig[i] = trig[i + 1];
+    trig[BEAM_REPEATS - 1] = t;
+  }
+  uint8_t recentCount(uint32_t t, uint32_t windowMs) const {
+    uint8_t c = 0;
+    for (uint8_t i = 0; i < trigN; i++) if (t - trig[i] < windowMs) c++;
+    return c;
+  }
+  bool recent(uint32_t t, uint32_t windowMs) const { return trigN > 0 && t - trig[trigN - 1] < windowMs; }
+  uint32_t lastTrig() const { return trigN ? trig[trigN - 1] : 0; }
+  void clearWindow() { trigN = 0; eventPending = false; }
+
+  uint8_t  health = BH_WARMUP;
+  bool     eventPending = false;
+  uint8_t  loggedHealth = 0xFF;            // last health written to the log
+  uint16_t lastWindowPulses = 0, lastWindowMs = BEAM_WINDOW_MS;
+
+private:
+  uint32_t lastPulse = 0, pulses = 0, fakeAt = 0;
+  bool     everPulsed = false;
+  uint32_t eventAt = 0, startedAt = 0, windowStart = 0, windowCount = 0, brokenSince = 0;
+  bool     started = false, intactNow = false;
+  uint32_t trig[BEAM_REPEATS] = {};
+  uint8_t  trigN = 0;
+};
+// ======== end of beam.h ========
 
 // =====================================================================
 //  PINS — ESP32 DevKitC 38-pin (WROOM-32). Check against your board's labels.
@@ -733,13 +912,15 @@ static const uint8_t USER_COUNT = sizeof(USERS) / sizeof(USERS[0]);
 const uint8_t PIN_SDA = 21, PIN_SCL = 22;                        // LCD I2C
 byte KP_ROWS[4] = { 13, 14, 27, 26 };                            // keypad pins 1-4
 byte KP_COLS[4] = { 25, 33, 32, 4 };                             // keypad pins 5-8 (driven: normal I/O only)
-const uint8_t PIN_BUZZER     = 16;    // A and B
+const uint8_t PIN_BUZZER     = 16;    // all four (C and D since v6.1)
 const uint8_t PIN_LED_GREEN  = 18;
 const uint8_t PIN_LED_YELLOW = 2;     // boot pin: the LED to GND keeps it LOW at boot, which is what it needs
 const uint8_t PIN_LED_RED    = 15;    // boot pin: the LED to GND only hides the boot messages; may blink at power-on
 const uint8_t PIN_PIR_1      = 17;    // A, B: the PIR on wall A-B (zone 2).   C, D: their only PIR
 const uint8_t PIN_PIR_2      = 19;    // A: the PIR on wall A-D (zone 1).      B: on wall B-C (zone 3)
 const uint8_t PIN_TAMPER     = 23;    // reed switch to GND; built-in pull-up
+const uint8_t PIN_IR         = 19;    // C: IR-08H OUT (receiver).  D: IR-08H EN (switches its sender on/off).
+                                      // (19 is A/B's second PIR; C and D have only one PIR, so it is free)
 
 const uint8_t TAMPER_CLOSED_LEVEL = LOW;   // lid shut = LOW; lid open OR wire cut = HIGH
 const bool    BUZZER_ACTIVE_LOW   = false; // true if your buzzer module beeps when the pin is LOW
@@ -761,7 +942,10 @@ const uint8_t* const MAC_SELF = MAC_MOD_D;
 #endif
 const char    MY_LETTER = MODULE_ID;
 const bool    FULL_CORNER = MODULE_ID == 'A' || MODULE_ID == 'B';   // 2 PIRs, buzzer, tamper, 3 LEDs
-const bool    HAS_BUZZER  = FULL_CORNER;
+const bool    HAS_BUZZER  = FULL_CORNER || CD_BUZZER_FITTED;
+const bool    BUZZ_LOW    = FULL_CORNER ? BUZZER_ACTIVE_LOW : CD_BUZZER_ACTIVE_LOW;
+const bool    BEAM_RX     = BEAM_FITTED && MY_NODE == BEAM_RX_NODE;   // C: watches the beam
+const bool    BEAM_TX     = BEAM_FITTED && MY_NODE == BEAM_TX_NODE;   // D: sends it
 const bool    HAS_TAMPER  = FULL_CORNER || CD_TAMPER_FITTED;
 const bool    HAS_GREEN   = FULL_CORNER || CD_LED_GREEN;
 const bool    HAS_YELLOW  = FULL_CORNER || CD_LED_YELLOW;
@@ -942,7 +1126,61 @@ bool anyPartnerRecent(uint32_t now) {
   for (uint8_t z = 1; z <= SITE_ZONES; z++) if (partnerRecent(z, now)) return true;
   return false;
 }
+// =====================================================================
+//  IR BEAM ON WALL C-D (v6.1, beam.h)
+//  Zone 4. C counts D's bursts in an interrupt; the loop hands the count to
+//  `beam`. To D (the other end of wall C-D) a break looks like the partner
+//  PIR firing on zone 4.
+// =====================================================================
+BeamTracker beam;                                  // used on C only
+const char* BEAM_NAME = "C-Z4";                    // its name in the log and on the dashboard
+bool beamRecent(uint32_t now) { return BEAM_RX && beam.recent(now, CORROBORATION_MS); }
+
 void clearPartners() { for (uint8_t z = 0; z <= SITE_ZONES; z++) partnerValid[z] = partnerNew[z] = false; }
+
+#if !WOKWI_SIM
+volatile uint32_t irLastPulseMs = 0, irPulseCount = 0;
+void IRAM_ATTR onIrPulse() { irLastPulseMs = millis(); irPulseCount++; }   // one burst from D arrived
+#endif
+
+void beamBegin() {
+  if (BEAM_RX) {
+    pinMode(PIN_IR, INPUT_PULLUP);                 // OUT idles HIGH (Wokwi: the "beam" button, pressed = LOW)
+#if !WOKWI_SIM
+    attachInterrupt(digitalPinToInterrupt(PIN_IR), onIrPulse, FALLING);
+#endif
+  }
+  if (BEAM_TX) {                                   // EN HIGH for 1 ms every 10 ms: the LEDC hardware does it
+    const uint32_t hz = 1000 / BEAM_PERIOD_MS;     // 100 Hz
+    const uint32_t duty = 4096 * BEAM_BURST_MS / BEAM_PERIOD_MS;   // 10 % of 12 bits
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+    ledcAttach(PIN_IR, hz, 12);
+    ledcWrite(PIN_IR, duty);
+#else
+    ledcSetup(0, hz, 12);
+    ledcAttachPin(PIN_IR, 0);
+    ledcWrite(0, duty);
+#endif
+  }
+}
+
+void beamLoop(uint32_t now) {                      // every loop pass, every state
+  if (!BEAM_RX) return;
+#if WOKWI_SIM
+  if (digitalRead(PIN_IR) == HIGH) beam.fakeSignal(now);   // button not pressed = beam arriving
+  beam.update(now, false);
+#else
+  uint32_t n = irPulseCount, t = irLastPulseMs;    // 32-bit reads are atomic on the ESP32
+  beam.sync(t, n);
+  beam.update(now, digitalRead(PIN_IR) == LOW);
+#endif
+  if (beam.health != beam.loggedHealth) {
+    if (beam.loggedHealth != 0xFF)
+      logEvent("HEALTH", String(beamHealthName(beam.loggedHealth)) + "->" + beam.healthText(), BEAM_NAME);
+    beam.loggedHealth = beam.health;
+  }
+}
+
 
 // Zones in alarm (bits): set by our own confirmation or another module's alarm.
 uint8_t alarmZones = 0;
@@ -1020,7 +1258,7 @@ void setBuzzer(bool on) {
   static bool was = false;                   // Wokwi's buzzer needs a tone
   if (on != was) { was = on; if (on) tone(PIN_BUZZER, 2000); else noTone(PIN_BUZZER); }
 #else
-  digitalWrite(PIN_BUZZER, BUZZER_ACTIVE_LOW ? !on : on);   // active buzzer: steady on/off
+  digitalWrite(PIN_BUZZER, BUZZ_LOW ? !on : on);   // active buzzer: steady on/off
 #endif
 }
 
@@ -1377,7 +1615,15 @@ void onCommand(const LinkPacket& p) {
 
 String partnerPir(uint8_t z) { return String(nodeLetter(zonePartner(z, MY_NODE))) + "-Z" + String(z); }
 
+// C: the beam was just broken. Count it and tell D (the other end of wall C-D).
+void beamBroken(uint32_t now) {
+  beam.addTrigger(now);
+  MeshPeer* d = mesh.find(BEAM_TX_NODE);
+  if (d) linkSend(*d, L_PEER_EVENT, BEAM_ZONE, 0, 0, 0, 0, nullptr);
+}
+
 // The module at the other end of one of our walls: its PIR on that wall fired.
+// (Zone 4: module C, the beam on wall C-D was broken.)
 void onPeerEvent(const MeshPeer& L, const LinkPacket& p) {
   uint8_t z = p.code;
   if (!zoneBit(z) || zonePartner(z, MY_NODE) != L.node || state != S_ARMED) return;
@@ -1391,7 +1637,7 @@ void onPeerEvent(const MeshPeer& L, const LinkPacket& p) {
 void onPeerAlarm(const MeshPeer& L, const LinkPacket& p) {
   uint8_t  i = L.node;
   uint32_t b = p.bootId, n = p.arg;               // copies: packed fields
-  uint8_t  zones = p.code & 0x07;
+  uint8_t  zones = p.code & ALL_ZONES;
   if (b == actedAlarmBoot[i] && n == actedAlarmNo[i]) return;     // already acted on this alarm
   String why = textOf(p);
   String zl  = " (zone " + zoneList(zones) + ")";
@@ -1513,7 +1759,7 @@ bool gatewayHeardSince(uint32_t t) { return gwLink.trk.lastHeard && (int32_t)(gw
 
 bool triggerPending(uint32_t now) {
   for (uint8_t i = 0; i < ZONE_COUNT; i++) if (zones[i].recent(now)) return true;
-  return anyPartnerRecent(now);
+  return anyPartnerRecent(now) || beamRecent(now);
 }
 
 void endSearch(bool found) {
@@ -1741,13 +1987,14 @@ uint8_t currentPriority() {
   if (state == S_INTRUSION)    return 2;
   if (state == S_ARMED) {
     uint32_t now = millis();
-    if (anyPartnerRecent(now)) return 1;
+    if (anyPartnerRecent(now) || beamRecent(now)) return 1;
     for (uint8_t i = 0; i < ZONE_COUNT; i++) if (zones[i].recent(now)) return 1;
   }
   return 0;
 }
 
-//  A,ARMED,P1,Z2:OK,Z1:OK,HIT:2,ALM:-,LID:SHUT,LCD:OK,LOCK:0,LOGNO:57,CH:6,NET:*DgDD,FWD:0,FW:6.0
+//  A,ARMED,P1,Z2:OK,Z1:OK,HIT:2,ALM:-,LID:SHUT,LCD:OK,LOCK:0,LOGNO:57,CH:6,NET:*DgDD,FWD:0,FW:6.1
+//  C,ARMED,P0,Z3:OK,IR:OK,HIT:-,...    (C: the beam OK / BRK / WARMUP / STUCK / NOSIG;  D: IR:TX)
 //  Z<n>: health of our PIR on zone n.  HIT: zones whose PIR (ours) fired in the last 20 s.
 //  ALM: zones in alarm.  NET: how we reach A B C D G (mesh.h netChar).  FWD: packets relayed.
 String statusText() {
@@ -1758,6 +2005,9 @@ String statusText() {
     s += ",Z" + String(zones[i].code) + ":" + healthName(zones[i].health);
     if (zones[i].recent(now) && (state == S_ARMED || state == S_INTRUSION)) hit |= zoneBit(zones[i].code);
   }
+  if (beamRecent(now) && (state == S_ARMED || state == S_INTRUSION)) hit |= zoneBit(BEAM_ZONE);
+  if (BEAM_RX) s += String(",IR:") + beam.stateText();
+  else if (BEAM_TX) s += ",IR:TX";
   s += ",HIT:" + zoneList(hit);
   s += ",ALM:" + (state == S_INTRUSION ? zoneList(alarmZones) : String("-"));
   s += String(",LID:") + (!HAS_TAMPER ? "NONE" : tamper.isOpen() ? "OPEN" : "SHUT");
@@ -1793,6 +2043,7 @@ void onEnter(State s, const String& reason) {
     case S_MAINTENANCE:  maintUntil = millis() + maintSeconds * 1000; maintShowStatus = false; break;
     case S_ARMED:        // fresh start: no stale detections, no open window
       for (uint8_t i = 0; i < ZONE_COUNT; i++) zones[i].clearWindow();
+      beam.clearWindow();
       clearPartners();
       break;
     default: break;
@@ -1907,11 +2158,16 @@ bool selfTest() {
   if (tamper.isOpen()) selfTestReason += "Lid open ";
   for (uint8_t i = 0; i < ZONE_COUNT; i++)
     if (zones[i].faulty()) selfTestReason += String(zones[i].name) + " " + healthName(zones[i].health) + " ";
+  if (BEAM_RX && beam.faulty()) selfTestReason += String("Beam ") + beam.healthText() + " ";
   if (!display.online)      logEvent("TEST", String("LCD missing - ") + (HAS_BUZZER ? "LEDs and buzzer only" : "LEDs only"));
   if (!gwLink.trk.online)   logEvent("TEST", "Gateway not connected - local log only");
   for (uint8_t i = 0; i < ZONE_COUNT; i++) {        // the module at the other end of each of our walls
     MeshPeer* P = mesh.find(zonePartner(zones[i].code, MY_NODE));
     if (P && !P->trk.online) logEvent("TEST", String(P->name) + " not connected - zone " + String(zones[i].code) + " on 3-hit rule");
+  }
+  if (BEAM_FITTED) {                                // the beam's other end
+    MeshPeer* P = mesh.find(BEAM_RX ? BEAM_TX_NODE : BEAM_RX_NODE);
+    if (P && !P->trk.online && (BEAM_RX || BEAM_TX)) logEvent("TEST", String(P->name) + " not connected - zone 4 beam still works at C");
   }
   outputTestUntil = millis() + 800;                 // short lamp + buzzer test
   selfTestReason.trim();
@@ -1921,6 +2177,7 @@ bool selfTest() {
 String armBlocker() {                               // "" = OK to arm
   for (uint8_t i = 0; i < ZONE_COUNT; i++)
     if (zones[i].warming()) return String(zones[i].name) + " warming";
+  if (BEAM_RX && beam.warming()) return "Beam: looking for D";
   return faultBlocker();
 }
 
@@ -1928,6 +2185,7 @@ String faultBlocker() {                             // "" = no lid / sensor prob
   if (tamper.isOpen()) return "Lid open";
   for (uint8_t i = 0; i < ZONE_COUNT; i++)
     if (zones[i].faulty()) return String(zones[i].name) + " " + healthName(zones[i].health);
+  if (BEAM_RX && beam.faulty()) return String("Beam ") + beam.healthText();
   return "";
 }
 
@@ -2053,6 +2311,7 @@ void confirmIntrusion(const String& why, const char* zone, uint8_t zoneBits) {
 void logMotionOutsideArmed(uint8_t prio, const char* what) {
   for (uint8_t i = 0; i < ZONE_COUNT; i++)
     if (zones[i].eventPending) { zones[i].eventPending = false; logEvent("SENSOR", what, zones[i].name, "-", prio); }
+  if (BEAM_RX && beam.eventPending) { beam.eventPending = false; logEvent("SENSOR", String(what) + " - beam broken", BEAM_NAME, "-", prio); }
 }
 
 void handleBoot() {
@@ -2083,6 +2342,7 @@ void handleArmed(char key) {
   // 1) Health first: a broken sensor is a FAULT, never an intrusion.          T06
   for (uint8_t i = 0; i < ZONE_COUNT; i++)
     if (zones[i].faulty()) { goTo(S_TAMPER_FAULT, String(zones[i].name) + " " + healthName(zones[i].health)); return; }
+  if (BEAM_RX && beam.faulty()) { goTo(S_TAMPER_FAULT, String("Beam ") + beam.healthText()); return; }
 
   // 2) Own triggers
   for (uint8_t i = 0; i < ZONE_COUNT; i++) {
@@ -2111,6 +2371,20 @@ void handleArmed(char key) {
     logEvent("ALERT", "Motion warning " + String(hits) + "/" + String(REPEAT_TRIGGERS), z.name, "-", 1);
   }
 
+  // 2b) C: the beam on wall C-D (zone 4) was broken. The only sensor on that
+  //     wall, so: twice in 20 s = intrusion, once = warning.
+  if (BEAM_RX && beam.eventPending) {
+    beam.eventPending = false;
+    beamBroken(now);                               // counts it, tells D
+    uint8_t hits = beam.recentCount(now, CORROBORATION_MS);
+    uint8_t zb = zoneBit(BEAM_ZONE);
+    const MeshPeer* inAlarm = moduleInAlarm();
+    if (inAlarm) { confirmIntrusion(String(BEAM_NAME) + " beam while " + inAlarm->name + " is in alarm", BEAM_NAME, zb); return; }
+    if (hits >= BEAM_REPEATS) { confirmIntrusion(String(BEAM_NAME) + " beam broken x" + String(hits), BEAM_NAME, zb); return; }
+    chirp();
+    logEvent("ALERT", "Beam broken " + String(hits) + "/" + String(BEAM_REPEATS), BEAM_NAME, "-", 1);
+  }
+
   // 3) The PIR at the other end of one of our walls fired
   for (uint8_t zn = 1; zn <= SITE_ZONES; zn++) {
     if (!partnerNew[zn]) continue;
@@ -2118,7 +2392,8 @@ void handleArmed(char key) {
     ZoneSensor* mine = zoneSensor(zn);
     String other = partnerPir(zn);
     if (mine && mine->recent(now)) { confirmIntrusion(String(mine->name) + " + " + other, other.c_str(), zoneBit(zn)); return; }
-    logEvent("ALERT", "Motion seen by " + nodeName(zonePartner(zn, MY_NODE)), other.c_str(), "-", 1);
+    logEvent("ALERT", String(zn == BEAM_ZONE ? "Beam broken, seen by " : "Motion seen by ") + nodeName(zonePartner(zn, MY_NODE)),
+             other.c_str(), "-", 1);
   }
 
   // 4) Screen
@@ -2130,7 +2405,10 @@ void handleArmed(char key) {
   } else if (anyPartnerRecent(now)) {
     uint8_t zn = 1;
     while (zn < SITE_ZONES && !partnerRecent(zn, now)) zn++;
-    setScreen(String(MY_LETTER) + " WARN P1", partnerPir(zn) + " motion");
+    setScreen(String(MY_LETTER) + " WARN P1", zn == BEAM_ZONE ? String("Beam C-D broken") : partnerPir(zn) + " motion");
+  } else if (beamRecent(now)) {
+    setScreen(String(MY_LETTER) + " WARN P1 " + String((CORROBORATION_MS - (now - beam.lastTrig())) / 1000 + 1) + "s",
+              "Beam C-Z4 " + String(beam.recentCount(now, CORROBORATION_MS)) + "/" + String(BEAM_REPEATS));
   } else {
     setScreen(String(MY_LETTER) + " ARMED       P0", linkLine());
   }
@@ -2155,6 +2433,19 @@ void handleIntrusion(char key) {
     logEvent("ALERT", "Intrusion zone " + String(z.code) + " (escalated): " + why, z.name, "-", 2);
     startPeerAlarm(why);                           // the other modules: zone added, buzzers on that wall
   }
+  if (BEAM_RX && beam.eventPending) {              // C: the beam during the alarm
+    beam.eventPending = false;
+    beam.addTrigger(millis());
+    uint8_t add = zoneBit(BEAM_ZONE) & ~alarmZones;
+    if (!add) logEvent("ALERT", "Beam broken during intrusion", BEAM_NAME, "-", 2);
+    else {
+      alarmZones |= add;
+      saveAlarmZones();
+      String why = String(BEAM_NAME) + " beam during the alarm";
+      logEvent("ALERT", "Intrusion zone " + zoneList(add) + " (escalated): " + why, BEAM_NAME, "-", 2);
+      startPeerAlarm(why);
+    }
+  }
   const PinUser* u = pollPin(key);
   if (u) {
     String who = String(u->name) + "@" + MY_LETTER + "-KEYPAD";
@@ -2176,6 +2467,7 @@ void handleTamperFault(char key) {
       zones[i].eventPending = false;
       if (zones[i].health == H_OK) logEvent("SENSOR", "Motion during fault", zones[i].name, "-", 3);
     }
+  if (BEAM_RX && beam.eventPending) { beam.eventPending = false; logEvent("SENSOR", "Beam broken during fault", BEAM_NAME, "-", 3); }
 
   // Clear here with a MAINTENANCE PIN (or from the gateway). Lid must be shut.
   const PinUser* u = pollPin(key);
@@ -2202,12 +2494,14 @@ void handleMaintenance(char key) {
   String st = "";
   for (uint8_t i = 0; i < ZONE_COUNT; i++)
     st += "Z" + String(zones[i].code) + ":" + (zones[i].health == H_OK ? "OK " : zones[i].health == H_STUCK ? "STK " : "WUP ");
+  if (BEAM_RX) st += String("IR:") + beam.stateText() + " ";
   uint8_t up = 0;
   for (MeshPeer* P : PEERS) if (P->trk.online) up++;
   st += String(up) + "/" + String(PEER_COUNT);
   setScreen(String(MY_LETTER) + " MAINT " + String(left) + "s", maintShowStatus ? st : "1Tst 2Sts 3Log C");
   for (uint8_t i = 0; i < ZONE_COUNT; i++)
     if (zones[i].eventPending) { zones[i].eventPending = false; logEvent("MAINT", "Test trigger", zones[i].name); }
+  if (BEAM_RX && beam.eventPending) { beam.eventPending = false; logEvent("MAINT", "Test trigger (beam broken)", BEAM_NAME); }
 
   if (!notYet(maintUntil)) { logEvent("MAINT", "Session timed out"); goTo(S_RECOVERY, "maintenance timeout"); return; }
   if (!key) return;
@@ -2223,7 +2517,8 @@ void handleMaintenance(char key) {
 void handleRecovery() {
   bool warming = false;
   for (uint8_t i = 0; i < ZONE_COUNT; i++) if (zones[i].warming()) warming = true;
-  setScreen(String(MY_LETTER) + " RECOVERY", warming ? "PIRs warming up" : "Revalidating...");
+  if (BEAM_RX && beam.warming()) warming = true;
+  setScreen(String(MY_LETTER) + " RECOVERY", warming ? "Sensors warming up" : "Revalidating...");
   if (millis() - stateEnteredAt < 1500 || warming) return;   // visible pause; PIRs must be ready
   if (selfTest()) {
     logEvent("TEST", "Recovery self-test OK", "-", "PASS");
@@ -2317,9 +2612,10 @@ void setup() {
   if (HAS_GREEN)  pinMode(PIN_LED_GREEN, OUTPUT);
   if (HAS_YELLOW) pinMode(PIN_LED_YELLOW, OUTPUT);
   if (HAS_RED)    pinMode(PIN_LED_RED, OUTPUT);
-  if (HAS_BUZZER) { pinMode(PIN_BUZZER, OUTPUT); digitalWrite(PIN_BUZZER, BUZZER_ACTIVE_LOW ? HIGH : LOW); }
+  if (HAS_BUZZER) { pinMode(PIN_BUZZER, OUTPUT); digitalWrite(PIN_BUZZER, BUZZ_LOW ? HIGH : LOW); }
   for (uint8_t i = 0; i < ZONE_COUNT; i++) zones[i].begin();
   tamper.begin();
+  beamBegin();
 
   // Persistent values (validated: corrupted data is ignored)
   prefs.begin("p13mod", false);
@@ -2331,7 +2627,7 @@ void setup() {
   savedState        = prefs.getUChar("state", S_DISARMED);
   if (savedState >= STATE_COUNT) savedState = S_TAMPER_FAULT;      // unknown value: fail closed
   savedReason       = prefs.getString("reason", "");
-  uint8_t savedZones = prefs.getUChar("azones", 0) & 0x07;
+  uint8_t savedZones = prefs.getUChar("azones", 0) & ALL_ZONES;
   lastLockTick      = millis();
 
   fsOk = LittleFS.begin(true);
@@ -2345,7 +2641,8 @@ void setup() {
   startWatchdog(WOKWI_SIM ? 20000 : 5000);   // sim: MQTT connect can take a few seconds
 
   String mac = WiFi.macAddress();
-  Serial.printf("\nSensor Module %c (walls: zone %s), MAC %s\n", MY_LETTER, zoneList(MY_WALLS).c_str(), mac.c_str());
+  Serial.printf("\nSensor Module %c (walls: zone %s), MAC %s%s\n", MY_LETTER, zoneList(MY_WALLS).c_str(), mac.c_str(),
+                BEAM_RX ? ", IR beam receiver" : BEAM_TX ? ", IR beam sender" : "");
   logEvent("SYSTEM", String("Boot #") + bootNo + " reason=" + resetReasonName(esp_reset_reason()) +
                      " saved=" + stateName(savedState) + (armedMode ? " armed" : " disarmed"));     // T10
   if (!fsOk)           logEvent("SYSTEM", "Log storage unavailable", "-", "ERROR");
@@ -2392,6 +2689,7 @@ void loop() {
       zones[i].loggedHealth = zones[i].health;
     }
   }
+  beamLoop(now);
   if (tamper.update(now))
     logEvent("TAMPER", tamper.isOpen() ? "Enclosure opened" : "Enclosure closed", "-", "-",
              tamper.isOpen() && state != S_MAINTENANCE ? 3 : -1);

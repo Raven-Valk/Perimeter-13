@@ -61,6 +61,34 @@
       "attrs": {
         "value": "220"
       }
+    },
+    {
+      "type": "wokwi-buzzer",
+      "id": "bz1",
+      "top": 220,
+      "left": 330,
+      "attrs": {
+        "volume": "0.2"
+      }
+    },
+    {
+      "type": "wokwi-led",
+      "id": "ledIR",
+      "top": 150,
+      "left": 420,
+      "attrs": {
+        "color": "purple",
+        "label": "IR sender EN"
+      }
+    },
+    {
+      "type": "wokwi-resistor",
+      "id": "rIR",
+      "top": 110,
+      "left": 400,
+      "attrs": {
+        "value": "220"
+      }
     }
   ],
   "connections": [
@@ -211,6 +239,36 @@
     [
       "ledYellow:C",
       "bb1:bn.11",
+      "black",
+      []
+    ],
+    [
+      "bz1:2",
+      "esp:16",
+      "magenta",
+      []
+    ],
+    [
+      "bz1:1",
+      "bb1:tn.9",
+      "black",
+      []
+    ],
+    [
+      "esp:19",
+      "rIR:1",
+      "purple",
+      []
+    ],
+    [
+      "rIR:2",
+      "ledIR:A",
+      "purple",
+      []
+    ],
+    [
+      "ledIR:C",
+      "bb1:tn.13",
       "black",
       []
     ]

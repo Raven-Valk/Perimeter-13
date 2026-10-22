@@ -127,10 +127,15 @@ export function updateAlerts(st) {
 
 /** A new log line, as it arrives (not the history). */
 export function alertForEvent(e) {
-  if (e.type !== "ALERT" || e.priority !== 1 || !/^Motion warning/.test(e.event) || !prefs.warnings) return;
+  const beam = /^Beam broken \d/.test(e.event);              // C's own zone 4 warning (v6.1), not D's copy
+  if (e.type !== "ALERT" || e.priority !== 1 || !(beam || /^Motion warning/.test(e.event)) || !prefs.warnings) return;
   const now = Date.now();
   if (now - lastWarn < 8000) return;
   lastWarn = now;
+  if (beam) {
+    notify("Warning: IR beam broken", "The zone 4 beam on wall C\u2060–\u2060D was broken once. Not confirmed yet.", "p13-warn-C-Z4", false);
+    return;
+  }
   const z = Number((e.zone || "").slice(-1));
   notify(`Warning: motion at ${e.zone}`, `One sensor on wall ${WALL[z] || "?"} fired. Not confirmed yet.`, `p13-warn-${e.zone}`, false);
 }

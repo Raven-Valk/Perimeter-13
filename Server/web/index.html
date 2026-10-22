@@ -118,7 +118,7 @@
   <section class="sheet only-overview" aria-label="Plan view of the site">
     <div class="sheet-scroll">
     <svg class="plan" id="plan" viewBox="0 0 1000 660" role="img" aria-labelledby="plan-title">
-      <title id="plan-title">Plan of the site: four modules at the corners, the gateway in the middle, PIR curtains on the outside of walls A-D, A-B and B-C, and the ten radio links of the mesh</title>
+      <title id="plan-title">Plan of the site: four modules at the corners, the gateway in the middle, PIR curtains on the outside of walls A-D, A-B and B-C (zones 1 to 3), an infrared beam along wall C-D (zone 4), and the ten radio links of the mesh</title>
       <defs>
         <pattern id="poche" width="7" height="7" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
           <line x1="0" y1="0" x2="0" y2="7" class="poche-line" />
@@ -157,7 +157,9 @@
         <rect x="928" y="235" width="20" height="160" class="dim-gap" />
         <text transform="translate(933 315) rotate(90)" id="dim-z3">Zone 3 · wall B–C</text>
       </g>
-      <text class="orient middle" x="500" y="548">Wall C–D · no sensors</text>
+      <g class="dimension">
+        <text x="500" y="558" id="dim-z4">Zone 4 · wall C–D · IR beam</text>
+      </g>
 
       <!-- PIR curtains: on the OUTSIDE face of each wall, looking along it -->
       <g class="fans">
@@ -173,7 +175,14 @@
         <rect id="wall-z2" x="152" y="112" width="696" height="18" />
         <rect id="wall-z1" x="152" y="112" width="18" height="406" />
         <rect id="wall-z3" x="830" y="112" width="18" height="406" />
-        <rect class="open-wall" x="152" y="500" width="696" height="18" />
+        <rect id="wall-z4" x="152" y="500" width="696" height="18" />
+      </g>
+
+      <!-- v6.1: zone 4, the infrared beam along the outside of wall C-D (D sends, C receives) -->
+      <g class="beam" id="fan-C-Z4">
+        <line class="ray" x1="178" y1="532" x2="822" y2="532" />
+        <rect class="ir-head" x="164" y="526" width="14" height="12" />
+        <rect class="ir-head" x="822" y="526" width="14" height="12" />
       </g>
 
       <g class="heads">
@@ -189,6 +198,8 @@
         <g class="tag" id="tag-D-Z1" transform="translate(106 422)"><rect x="-26" y="-11" width="52" height="20" /><text y="4">D-Z1</text></g>
         <g class="tag" id="tag-B-Z3" transform="translate(894 208)"><rect x="-26" y="-11" width="52" height="20" /><text y="4">B-Z3</text></g>
         <g class="tag" id="tag-C-Z3" transform="translate(894 422)"><rect x="-26" y="-11" width="52" height="20" /><text y="4">C-Z3</text></g>
+        <g class="tag" id="tag-D-IR" transform="translate(218 552)"><rect x="-26" y="-11" width="52" height="20" /><text y="4">D-IR</text></g>
+        <g class="tag" id="tag-C-Z4" transform="translate(730 552)"><rect x="-26" y="-11" width="52" height="20" /><text y="4">C-Z4</text></g>
       </g>
 
       <!-- the mesh: filled in by plan.js (10 links, relay routes) -->
@@ -211,11 +222,13 @@
         <rect class="box" x="718" y="458" width="104" height="36" />
         <text class="letter" x="736" y="482">C</text>
         <text class="unit-state" x="754" y="481" id="unit-C-state">—</text>
+        <g class="buzzer" id="buzz-C" transform="translate(790 438)"><path d="M0 -5h4l5 -4v18l-5 -4h-4z" /><path class="wave" d="M13 -3q3 4 0 8M16 -6q6 7 0 14" /></g>
       </g>
       <g class="unit" id="unit-D" data-state="unknown">
         <rect class="box" x="178" y="458" width="104" height="36" />
         <text class="letter" x="196" y="482">D</text>
         <text class="unit-state" x="214" y="481" id="unit-D-state">—</text>
+        <g class="buzzer" id="buzz-D" transform="translate(186 438)"><path d="M0 -5h4l5 -4v18l-5 -4h-4z" /><path class="wave" d="M13 -3q3 4 0 8M16 -6q6 7 0 14" /></g>
       </g>
       <g class="unit gateway" id="unit-G" data-state="unknown">
         <rect class="box" x="438" y="296" width="124" height="38" />
@@ -234,6 +247,7 @@
         <line x1="90" y1="0" x2="116" y2="0" class="radio relayed" /><text x="122" y="4">relayed</text>
         <line x1="0" y1="20" x2="26" y2="20" class="radio down" /><text x="32" y="24">no link</text>
         <line x1="90" y1="20" x2="116" y2="20" class="route" /><text x="122" y="24">relay route</text>
+        <line x1="0" y1="40" x2="26" y2="40" class="beam-key" /><text x="32" y="44">IR beam</text>
       </g>
 
       <g class="title-block" transform="translate(30 570)">

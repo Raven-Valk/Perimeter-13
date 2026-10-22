@@ -13,12 +13,14 @@ const tone = {
   health: (v) => ({ OK: "good", WARMUP: "warn", STUCK: "bad", OFFLINE: "bad" })[v] || "",
   lid: (v) => ({ SHUT: "good", OPEN: "bad" })[v] || "",
   ok: (v) => ({ OK: "good", OFFLINE: "bad" })[v] || "",
+  beam: (v) => ({ OK: "good", TX: "good", BRK: "warn", WARMUP: "warn", STUCK: "bad", NOSIG: "bad" })[v] || "",
 };
 const words = {
   health: (v) => ({ OK: "OK", WARMUP: "Warming", STUCK: "Stuck", OFFLINE: "Unplugged" })[v] || v,
   lid: (v) => ({ SHUT: "Shut", OPEN: "Open", NONE: "None" })[v] || v,
   ok: (v) => ({ OK: "OK", OFFLINE: "Missing" })[v] || v,
   lock: (v) => (v === undefined ? undefined : Number(v) > 0 ? `${v} s` : "No"),
+  beam: (v) => ({ OK: "Intact", BRK: "Broken", WARMUP: "Searching", STUCK: "Blocked", NOSIG: "No signal", TX: "Sending" })[v] || v,
 };
 
 function cell(value, cls = "") {
@@ -54,6 +56,7 @@ export function renderUnits(st) {
                       Number(m[k].priority) >= 2 ? "bad" : Number(m[k].priority) === 1 ? "warn" : ""])],
     ["PIRs", [], ...each((k) => [Object.keys(m[k]).filter((x) => /^Z[1-3]$/.test(x)).sort()
       .map((z) => [`${z} ${words.health(m[k][z])}`, tone.health(m[k][z])])])],
+    ["IR beam", [], ...each((k) => [m[k].IR ? words.beam(m[k].IR) : undefined, tone.beam(m[k].IR)])],
     ["Alarm zones", [], ...each((k) => [m[k].ALM && m[k].ALM !== "-" ? m[k].ALM : undefined, "bad"])],
     ["Enclosure", [words.lid(g.LID), tone.lid(g.LID)], ...each((k) => [words.lid(m[k].LID), tone.lid(m[k].LID)])],
     ["Display", [words.ok(g.LCD), tone.ok(g.LCD)], ...each((k) => [words.ok(m[k].LCD), tone.ok(m[k].LCD)])],

@@ -1,6 +1,6 @@
 // =====================================================================
 //  PINNACLE 1 — PROJECT 13 — SECURE PERIMETER INTRUSION DETECTION
-//  GATEWAY  —  ESP32 DevKit V1 30-pin  —  firmware v6.0
+//  GATEWAY  —  ESP32 DevKit V1 30-pin  —  firmware v6.1
 //
 //  The control box, in the middle of the site. Runs on a power adapter; one of
 //  the five radios of the mesh (mesh.h) with Sensor Modules A, B, C and D at the
@@ -68,7 +68,7 @@ struct ModuleView;
 
 // ======== link_protocol.h (inlined for Wokwi: no extra files needed) ========
 // =====================================================================
-//  link_protocol.h  —  v4 (firmware 6.0), shared by every part of Project 13:
+//  link_protocol.h  —  v4 (firmware 6.1), shared by every part of Project 13:
 //    Sensor Modules A, B, C, D, the Gateway, and the server (Server/p13server/protocol.py
 //    is the same format in Python). Keep this file IDENTICAL in every sketch folder.
 //
@@ -99,8 +99,8 @@ struct LinkPacket;
 struct MeshPeer;      // mesh.h
 class Mesh;
 
-#define LINK_VERSION    4
-#define FIRMWARE_VERSION "6.0"
+#define LINK_VERSION    5   // 5 = firmware 6.1: four zones (zone 4 = the IR beam on wall C-D)
+#define FIRMWARE_VERSION "6.1"
 #define ESPNOW_DEFAULT_CHANNEL 1  // until the gateway's Wi-Fi decides: the gateway uses its
                                   // network's channel and the modules find it by themselves
 #define SIG_LEN         8      // bytes of HMAC-SHA256 kept in each packet
@@ -113,24 +113,26 @@ class Mesh;
 //   p13/<SITE_ID>/to/G  and  p13/<SITE_ID>/to/P   (see Gateway/secrets.h).
 #define MQTT_BROKER      "broker.hivemq.com"
 #define MQTT_PORT        1883
-#define MQTT_TOPIC_BASE  "pinnacle13/p13-2d386efc/v6"
+#define MQTT_TOPIC_BASE  "pinnacle13/p13-2d386efc/v61"
 
 enum LinkNode : uint8_t { NODE_NONE = 0, NODE_MOD_A = 1, NODE_MOD_B = 2, NODE_MOD_C = 3, NODE_MOD_D = 4,
                          NODE_GATEWAY = 9, NODE_SERVER = 10 };
 inline bool isModule(uint8_t n) { return n >= NODE_MOD_A && n <= NODE_MOD_D; }
 
 // ---------------- the site: a rectangle, modules at the corners ----------------
-//        A ---- zone 2 ---- B          Each protected wall (zone) has a PIR at
-//        |                  |          both ends, mounted on the OUTSIDE face
-//     zone 1      G      zone 3        and looking along it (a "curtain").
-//        |                  |          Wall C-D has no sensors.
-//        D -----(none)----- C          G = gateway, in the middle.
+//        A ---- zone 2 ---- B          Zones 1-3: a PIR at both ends of the
+//        |                  |          wall, on the OUTSIDE face, looking
+//     zone 1      G      zone 3        along it (a "curtain").
+//        |                  |          Zone 4 (v6.1): one infrared beam along
+//        D ~~~~ zone 4 ~~~~ C          wall C-D, D sends, C receives. G = gateway.
 //  Zone 1 = wall A-D (PIRs "A-Z1", "D-Z1"), zone 2 = wall A-B ("A-Z2", "B-Z2"),
-//  zone 3 = wall B-C ("B-Z3", "C-Z3"). A and B have buzzers: an intrusion in a
-//  zone sounds the buzzer of each module on that wall that has one.
-const uint8_t SITE_ZONES = 3;
-const uint8_t ZONE_END1[SITE_ZONES + 1] = { 0, NODE_MOD_A, NODE_MOD_A, NODE_MOD_B };
-const uint8_t ZONE_END2[SITE_ZONES + 1] = { 0, NODE_MOD_D, NODE_MOD_B, NODE_MOD_C };
+//  zone 3 = wall B-C ("B-Z3", "C-Z3"), zone 4 = wall C-D (beam "C-Z4", seen by C).
+//  Every module has a buzzer (C and D since v6.1): an intrusion in a zone sounds
+//  the buzzer of each module on that wall.
+const uint8_t SITE_ZONES = 4;
+const uint8_t ZONE_END1[SITE_ZONES + 1] = { 0, NODE_MOD_A, NODE_MOD_A, NODE_MOD_B, NODE_MOD_D };
+const uint8_t ZONE_END2[SITE_ZONES + 1] = { 0, NODE_MOD_D, NODE_MOD_B, NODE_MOD_C, NODE_MOD_C };
+const uint8_t ALL_ZONES  = (1 << SITE_ZONES) - 1;      // zone bits 0x0F
 inline uint8_t zoneBit(uint8_t z) { return z >= 1 && z <= SITE_ZONES ? 1 << (z - 1) : 0; }
 inline uint8_t zonePartner(uint8_t z, uint8_t me) {      // the module at the other end of zone z's wall
   if (!zoneBit(z)) return NODE_NONE;
@@ -142,6 +144,16 @@ inline uint8_t zonesOf(uint8_t node) {                  // the walls a module st
   return m;
 }
 
+// v6.1: zone 4 is an infrared beam along wall C-D, just outside it. D's IR module
+// sends, C's receives (beam.h). It is the only sensor on that wall, so:
+//   beam broken once                          -> warning (P1)
+//   beam broken twice within 20 s             -> intrusion, zone 4
+//   beam broken while an intrusion is active  -> zone 4 joins the alarm at once
+// C tells D (the other end of the wall) with an ordinary L_PEER_EVENT, code 4.
+const uint8_t BEAM_TX_NODE = NODE_MOD_D;
+const uint8_t BEAM_RX_NODE = NODE_MOD_C;
+const uint8_t BEAM_ZONE    = 4;
+
 enum LinkType : uint8_t {
   L_HELLO      = 1,  // status beat that also says "this is my boot ID". At boot and every 10th beat.
   L_STATUS     = 2,  // status beat, every second: state, priority, health in text
@@ -149,6 +161,7 @@ enum LinkType : uint8_t {
   L_ACK        = 4,  // gateway -> module: reply to each status beat ("link alive").
                      //   HELLO / ACK from the gateway: code = its radio channel (0 = not said)
   L_PEER_EVENT = 5,  // module -> module at the other end of the wall: my PIR on zone `code` fired (arg = age in ms)
+                     //   (code 4: C -> D, the beam on wall C-D was broken)
   L_PEER_ALARM = 6,  // module -> the other modules: intrusion confirmed, alarm everyone
                      //   (code = zones in alarm (bits), arg = alarm no., text = why)
   L_CMD        = 7,  // gateway -> module: command (code = Cmd, role, arg, text = "user@source")
@@ -431,7 +444,7 @@ inline bool notYet(uint32_t t) { return (int32_t)(t - millis()) > 0; }
 // ======== end of link_protocol.h ========
 // ======== mesh.h (inlined for Wokwi: no extra files needed) ========
 // =====================================================================
-//  mesh.h  —  the radio mesh (firmware 6.0). IDENTICAL in Gateway/ and SensorModule/.
+//  mesh.h  —  the radio mesh (firmware 6.1). IDENTICAL in Gateway/ and SensorModule/.
 //
 //  Five radios: modules A, B, C, D and the gateway. Each one talks straight to
 //  the other four (a full mesh: 10 links, each with its own key).
@@ -1584,7 +1597,7 @@ void finishPending(const String& extra) {
     if (!(pend.targets & m.mask)) continue;
     String r;
     if (pend.done & m.mask) {
-      if (pend.res[i] == RES_OK) r = "OK";
+      if (pend.res[i] == RES_OK) r = pend.cmd == CMD_TEST_CUT && pend.why[i].length() ? pend.why[i] : String("OK");
       else { r = pend.why[i].length() ? pend.why[i] : String(resultName(pend.res[i])); if (overall == RES_OK) overall = pend.res[i]; }
     } else {
       r = "no reply";

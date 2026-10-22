@@ -1,5 +1,5 @@
 // =====================================================================
-//  mesh.h  —  the radio mesh (firmware 6.0). IDENTICAL in Gateway/ and SensorModule/.
+//  mesh.h  —  the radio mesh (firmware 6.1). IDENTICAL in Gateway/ and SensorModule/.
 //
 //  Five radios: modules A, B, C, D and the gateway. Each one talks straight to
 //  the other four (a full mesh: 10 links, each with its own key).

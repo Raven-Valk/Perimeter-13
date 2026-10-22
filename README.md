@@ -1,4 +1,4 @@
-# Project 13: Secure Perimeter Intrusion Detection (v6.0)
+# Project 13: Secure Perimeter Intrusion Detection (v6.1)
 
 > **Repository note.** Each `secrets.h` is stored here as `secrets.example.h` with demo values only. Copy it to `secrets.h` in the same folder before compiling, and use your own keys and PINs. `secrets.h` is in `.gitignore` and must never be committed.
 
@@ -18,22 +18,30 @@ The Wokwi versions are in `Wokwi/` (five projects). They are made from this fold
 ```
           zone 2 (wall A–B)
      A ════════════════════ B          A, B: two PIRs, buzzer, tamper switch, 3 LEDs, LCD, keypad
-     ║ ╲                  ╱ ║          C, D: one PIR, LCD, keypad (tamper and LEDs optional, no buzzer)
-zone ║   ╲              ╱   ║ zone     G:    the gateway, in the middle
-  1  ║        G             ║  3
-     ║   ╱              ╲   ║          Each zone is one wall with a PIR at both ends, mounted on the
-     ║ ╱                  ╲ ║          OUTSIDE face and looking along it (a curtain), at low
-     D ──────────────────── C          sensitivity and short range. Wall C–D has no sensors.
-          (no sensors)
+     ║ ╲                  ╱ ║          C:    one PIR, IR beam RECEIVER, buzzer, LCD, keypad
+zone ║   ╲              ╱   ║ zone     D:    one PIR, IR beam SENDER, buzzer, LCD, keypad
+  1  ║        G             ║  3             (C, D: tamper switch and LEDs optional)
+     ║   ╱              ╲   ║          G:    the gateway, in the middle
+     ║ ╱                  ╲ ║
+     D ~~~~~~~~~~~~~~~~~~~~ C          Zones 1–3: a PIR at both ends of the wall, on the OUTSIDE
+          zone 4 (wall C–D)            face, looking along it (a curtain), low sensitivity, short range.
+          one IR beam, D → C           Zone 4: one infrared beam just outside wall C–D.
 ```
 
-| Zone | Wall | PIRs | Buzzer that sounds |
+| Zone | Wall | Sensors | Buzzers that sound |
 |---|---|---|---|
-| 1 | A–D | A-Z1, D-Z1 | A |
-| 2 | A–B | A-Z2, B-Z2 | A and B |
-| 3 | B–C | B-Z3, C-Z3 | B |
+| 1 | A–D | PIRs A-Z1, D-Z1 | A and D |
+| 2 | A–B | PIRs A-Z2, B-Z2 | A and B |
+| 3 | B–C | PIRs B-Z3, C-Z3 | B and C |
+| 4 | C–D | IR beam C-Z4 (D sends, C receives) | C and D |
 
-**Rules.** A single trigger is a warning (P1). An intrusion (P2) is confirmed when, within 20 s, both PIRs of a wall fire, or both PIRs of one corner (A or B), or one PIR fires 3 times. Every armed module then goes to INTRUSION, and the buzzers on the walls in alarm sound. **While that intrusion is not acknowledged, any single PIR anywhere is an intrusion at once** (in its own zone): no 20-second window, no 3 hits. After acknowledging, the normal rules are back.
+**Rules.** A single trigger is a warning (P1). An intrusion (P2) is confirmed when, within 20 s:
+- zones 1–3: both PIRs of a wall fire, or both PIRs of one corner (A or B), or one PIR fires 3 times;
+- zone 4: the beam is broken **twice** (it is the only sensor on that wall).
+
+Every armed module then goes to INTRUSION, and the buzzers on the walls in alarm sound. **While that intrusion is not acknowledged, any single sensor anywhere is an intrusion at once** (in its own zone): no 20-second window, no repeats. After acknowledging, the normal rules are back.
+
+A beam blocked for 30 s, or no signal from D at all, is a **fault** (P3), like a stuck PIR: it never counts as an intrusion.
 
 ## How the parts talk
 
@@ -63,7 +71,18 @@ zone ║   ╲              ╱   ║ zone     G:    the gateway, in the middle
 
 To try the dashboard first, with no hardware and no setup: `cd Server && pip install -r requirements.txt && python3 -m p13server --emulate`, then open http://127.0.0.1:8080 (user `admin`, password `admin123`).
 
-**`link_protocol.h` and `mesh.h` must be identical in every board's folder.**
+**`link_protocol.h` and `mesh.h` must be identical in every board's folder.** 6.1 uses link protocol version 5: **all five boards must run 6.1** (a 6.0 board refuses 6.1 packets and the other way round).
+
+## Changes in 6.1
+
+| | |
+|---|---|
+| **Zone 4** | Wall C–D is now protected by one infrared beam: two IR-08H modules, D sends (EN on GPIO 19, 1 ms bursts every 10 ms from the ESP32's LEDC), C receives (OUT on GPIO 19, counted by an interrupt). One break = warning, two breaks within 20 s = intrusion in zone 4. Blocked for 30 s or no signal = fault. Code in `SensorModule/beam.h`, tests in `tests/beam_tests.cpp`. |
+| **Buzzers** | C and D now have a 3-pin buzzer module on GPIO 16 (`CD_BUZZER_FITTED`). Zone 1 sounds A + D, zone 3 B + C, zone 4 C + D. |
+| **Protocol** | v5: four zones (zone bits 0x0F). C tells D about a break with the ordinary "my sensor on our wall fired" packet (zone 4). |
+| **Gateway** | No logic change; upload it again because of the protocol version. |
+| **Dashboard** | Zone 4 on the plan: the beam along wall C–D, tags C-Z4 / D-IR, buzzers at C and D. New row "IR beam" in Units (Intact / Broken / Searching / Blocked / No signal / Sending). Warnings and notifications for the beam. |
+| **Status** | C reports `IR:OK|BRK|WARMUP|STUCK|NOSIG`, D reports `IR:TX`; `HIT` / `ALM` can contain 4. |
 
 ## Changes in 6.0
 
@@ -92,3 +111,4 @@ Every version of the project is a tagged commit in this repository. Full notes: 
 | `v4.3` | 2026-10-09 | built-in pull-ups instead of resistors, new pin map, wiring diagrams |
 | `v5` | 2026-10-10 | gateway on Wi-Fi (MQTT over TLS) + server and dashboard website |
 | `v6` | 2026-10-10 | four modules in a full mesh with relay, three walled zones, new dashboard |
+| `v6.1` | 2026-10-22 | zone 4 on wall C-D with an IR beam, buzzers on C and D |

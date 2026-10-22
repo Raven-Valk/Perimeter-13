@@ -102,9 +102,12 @@ int main(){
   CHECK(zonePartner(1,NODE_MOD_A)==NODE_MOD_D && zonePartner(1,NODE_MOD_D)==NODE_MOD_A, "Zone 1 = wall A-D");
   CHECK(zonePartner(2,NODE_MOD_A)==NODE_MOD_B && zonePartner(2,NODE_MOD_B)==NODE_MOD_A, "Zone 2 = wall A-B");
   CHECK(zonePartner(3,NODE_MOD_B)==NODE_MOD_C && zonePartner(3,NODE_MOD_C)==NODE_MOD_B, "Zone 3 = wall B-C");
-  CHECK(zonePartner(3,NODE_MOD_A)==NODE_NONE && zonePartner(4,NODE_MOD_C)==NODE_NONE, "A is not on wall B-C; there is no zone 4 (wall C-D)");
+  CHECK(zonePartner(4,NODE_MOD_C)==NODE_MOD_D && zonePartner(4,NODE_MOD_D)==NODE_MOD_C, "Zone 4 = wall C-D (the beam)");
+  CHECK(zonePartner(3,NODE_MOD_A)==NODE_NONE && zonePartner(5,NODE_MOD_C)==NODE_NONE && zoneBit(5)==0, "A is not on wall B-C; there is no zone 5");
   CHECK(zonesOf(NODE_MOD_A)==0b011 && zonesOf(NODE_MOD_B)==0b110, "A stands on zones 1+2, B on zones 2+3");
-  CHECK(zonesOf(NODE_MOD_C)==0b100 && zonesOf(NODE_MOD_D)==0b001, "C on zone 3, D on zone 1");
+  CHECK(zonesOf(NODE_MOD_C)==0b1100 && zonesOf(NODE_MOD_D)==0b1001, "C on zones 3+4, D on zones 1+4");
+  CHECK((zonesOf(NODE_MOD_C)&zoneBit(4)) && (zonesOf(NODE_MOD_D)&zoneBit(4)) && !(zonesOf(NODE_MOD_A)&zoneBit(4)), "Buzzers: zone 4 alarm sounds C and D, not A");
+  CHECK(ALL_ZONES == 0x0F, "four zone bits");
   CHECK((zonesOf(NODE_MOD_A)&zoneBit(1)) && !(zonesOf(NODE_MOD_B)&zoneBit(1)), "Buzzers: zone 1 alarm sounds A, not B");
   CHECK((zonesOf(NODE_MOD_B)&zoneBit(3)) && !(zonesOf(NODE_MOD_A)&zoneBit(3)), "Buzzers: zone 3 alarm sounds B, not A");
   CHECK((zonesOf(NODE_MOD_A)&zoneBit(2)) && (zonesOf(NODE_MOD_B)&zoneBit(2)), "Buzzers: zone 2 alarm sounds A and B");

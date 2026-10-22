@@ -221,6 +221,51 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
         emu.trigger(emu.mods["D"], 1)                                # after the ack: back to the normal rules
         self.assertEqual(emu.mods["D"].state, "ARMED")
 
+    # ---------------- zone 4: the IR beam on wall C-D (6.1) ----------------
+    async def arm_all(self):
+        emu = self.rig.emu
+        await self.rig.until(lambda: all(m.state == "DISARMED" for m in emu.mods.values()))
+        for m in emu.mods.values():
+            m.apply(1, 2, "test", 0)                                 # ARM
+        return emu
+
+    async def test_beam_status_reaches_the_dashboard(self):
+        await self.rig.until(lambda: self.rig.link.nodes["D"].get("state") == "DISARMED")
+        self.assertEqual(self.rig.link.nodes["C"].get("IR"), "OK")
+        self.assertEqual(self.rig.link.nodes["D"].get("IR"), "TX")
+        self.assertIsNone(self.rig.link.nodes["A"].get("IR"))
+
+    async def test_one_break_warns_two_breaks_confirm_zone_4(self):
+        emu = await self.arm_all()
+        emu.beam_break()                                             # once: a warning at C and D only
+        self.assertTrue(all(m.state == "ARMED" for m in emu.mods.values()))
+        self.assertEqual((emu.mods["C"].priority, emu.mods["D"].priority, emu.mods["A"].priority), (1, 1, 0))
+        await self.rig.until(lambda: self.rig.link.nodes["C"].get("HIT") == "4")
+        emu.beam_break()                                             # twice within 20 s: intrusion, zone 4
+        self.assertTrue(all(m.state == "INTRUSION" for m in emu.mods.values()))
+        self.assertEqual(emu.mods["A"].alarm_zones, {4})
+        await self.rig.until(lambda: self.rig.link.nodes["B"].get("ALM") == "4")
+
+    async def test_pir_and_beam_are_separate_zones(self):
+        emu = await self.arm_all()
+        emu.trigger(emu.mods["C"], 3)                                # C-Z3: a warning on zone 3
+        emu.beam_break()                                             # the beam: a warning on zone 4
+        self.assertEqual(emu.mods["C"].state, "ARMED")               # no cross-zone confirmation
+
+    async def test_beam_during_an_alarm_adds_zone_4(self):
+        emu = await self.arm_all()
+        emu.trigger(emu.mods["B"], 2)
+        emu.trigger(emu.mods["A"], 2)                                # intrusion, zone 2
+        emu.beam_break()
+        self.assertEqual(emu.mods["A"].alarm_zones, {2, 4})
+        await self.rig.until(lambda: self.rig.link.nodes["D"].get("ALM") == "2+4")
+
+    def test_zone_4_sounds_c_and_d(self):
+        from p13server.protocol import BUZZERS, zone_digits, zones_of
+        self.assertEqual(set(BUZZERS), set("ABCD"))
+        self.assertEqual((zones_of("C"), zones_of("D")), ([3, 4], [1, 4]))
+        self.assertEqual(zone_digits("2+4"), [2, 4])
+
     # ---------------- packets ----------------
     async def test_replayed_packet_is_refused(self):
         await asyncio.sleep(1.5)

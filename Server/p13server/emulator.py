@@ -2,8 +2,8 @@
 dashboard without hardware. It speaks the real protocol: signed packets,
 replay protection, challenge-response login with the demo accounts, roles,
 command results, log numbering and re-sends. It also plays the site: PIR
-warnings, wall-pair confirmations, escalation while an alarm is active, and
-mesh links that now and then fail and get relayed through another board.
+warnings, wall-pair confirmations, the IR beam of zone 4 (6.1), escalation
+while an alarm is active, and mesh links that now and then fail and get relayed through another board.
 
 Run in-process:   python -m p13server --emulate
 Run over MQTT:    python tools/gateway_emulator.py   (connects to Mosquitto as the gateway)
@@ -23,7 +23,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable
 
-from .protocol import (MESH_ORDER, MODULES, NODE_LETTERS, TARGET_ALL, ZONES, Cmd, Node, Packet, PacketError,
+from .protocol import (BEAM_NAME, BEAM_RX, BEAM_TX, BEAM_ZONE, MESH_ORDER, MODULES, NODE_LETTERS, TARGET_ALL, ZONES, Cmd, Node, Packet, PacketError,
                        PeerTracker, Result, Role, Track, Type, decode, make_boot_id, needs_freshness, verify)
 
 # Gateway/secrets.h demo accounts: PBKDF2-HMAC-SHA256(password, "p13-pc:" + user, 100000)
@@ -45,6 +45,8 @@ WINDOW = 20.0                       # corroboration window (s)
 SCENE_EVERY = float(os.environ.get("P13_EMULATOR_INTERVAL", "45"))
 CONFIRM_CHANCE = float(os.environ.get("P13_EMULATOR_CONFIRM", "0.35"))
 LINK_FAULT_CHANCE = float(os.environ.get("P13_EMULATOR_LINK_FAULTS", "0.25"))
+BEAM_CHANCE = float(os.environ.get("P13_EMULATOR_BEAM", "0.3"))   # a scene is a beam break (0..1)
+BEAM_REPEATS = 2                    # zone 4: two breaks within 20 s confirm
 
 PIRS = {"A": [2, 1], "B": [2, 3], "C": [3], "D": [1]}       # each module's PIRs, by zone
 
@@ -74,6 +76,8 @@ class EmuModule:
     alarm_zones: set = field(default_factory=set)
     hits: dict = field(default_factory=dict)            # zone -> time of our PIR's last trigger
     seen_until: float = 0.0                             # the partner PIR fired (P1) until then
+    beam_breaks: list = field(default_factory=list)     # C only: its recent break times
+    beam_broken_until: float = 0.0                      # C only: status shows IR:BRK until then
     forwarded: int = 0
     rssi: int = field(default_factory=lambda: random.randint(-64, -48))
 
@@ -109,6 +113,7 @@ class EmuModule:
         if state == "ARMED":
             self.hits.clear()
             self.seen_until = 0.0
+            self.beam_breaks.clear()
         self.log("STATE", f"{old}->{state} ({reason})")
 
     def status_text(self) -> str:
@@ -116,12 +121,16 @@ class EmuModule:
         now = time.time()
         hit = {z for z, t in self.hits.items() if now - t < WINDOW} if self.state in ("ARMED", "INTRUSION") else set()
         zones = ",".join(f"Z{z}:{health}" for z in PIRS[self.letter])
+        if self.letter == BEAM_RX:
+            zones += ",IR:" + ("WARMUP" if self.state == "BOOT" else "BRK" if now < self.beam_broken_until else "OK")
+        elif self.letter == BEAM_TX:
+            zones += ",IR:TX"
         lid = ("OPEN" if self.lid_open else "SHUT") if self.full else "NONE"
         cut = "".join(o for o in MESH_ORDER if o != self.letter and self.gw.test_cut(self.letter, o))
         return (f"{self.letter},{self.state},P{self.priority},{zones},HIT:{zone_text(hit)},"
                 f"ALM:{zone_text(self.alarm_zones) if self.state == 'INTRUSION' else '-'},LID:{lid},LCD:OK,LOCK:0,"
                 f"LOGNO:{self.log_no},CH:{self.gw.channel},NET:{self.gw.net_text(self.letter)},FWD:{self.forwarded}"
-                + (f",CUT:{cut}" if cut else "") + ",FW:6.0")
+                + (f",CUT:{cut}" if cut else "") + ",FW:6.1")
 
     def apply(self, cmd: int, role: int, who: str, arg: int) -> tuple[int, str]:
         """Module-side checks, as SensorModule.ino applyCommand()."""
@@ -295,6 +304,8 @@ class EmulatedGateway:
             (31052, lambda at: c.log("ALERT", "Intrusion zone 3 (escalated): C-Z3 during the alarm", zone="C-Z3", prio=2, at=at)),
             (31120, lambda at: self.glog("AUTH", "Dashboard login (OPERATOR)", result="SUCCESS", user="operator@web", at=at)),
             (31131, lambda at: self.glog("CMD", "ACK_ALARM: A:OK B:OK C:OK D:OK", result="OK", user="operator@web", at=at)),
+            (40200, lambda at: c.log("ALERT", "Beam broken 1/2", zone="C-Z4", prio=1, at=at)),
+            (40200, lambda at: d.log("ALERT", "Beam broken, seen by Module C", zone="C-Z4", prio=1, at=at)),
             (52000, lambda at: self.glog("AUTH", "Card + PIN refused", result="FAIL", user="card **:9A:01@GW", at=at)),
             (52010, lambda at: self.glog("AUTH", "Card + PIN refused", result="FAIL", user="card **:9A:01@GW", at=at)),
             (61200, lambda at: self.glog("CMD", "DISARM: A:OK B:OK C:OK D:OK", result="OK", user="Operator1@GW", at=at)),
@@ -592,6 +603,40 @@ class EmulatedGateway:
             other.seen_until = now + WINDOW
             other.log("ALERT", f"Motion seen by Module {m.letter}", zone=name, prio=1)
 
+    def beam_break(self) -> None:
+        """Someone crossed the beam on wall C-D (zone 4): C's rules (handleArmed 2b, handleIntrusion)."""
+        now = time.time()
+        c, d = self.mods[BEAM_RX], self.mods[BEAM_TX]
+        c.beam_broken_until = now + 1.5
+        if c.state == "INTRUSION":
+            if BEAM_ZONE in c.alarm_zones:
+                c.log("ALERT", "Beam broken during intrusion", zone=BEAM_NAME, prio=2)
+                return
+            c.alarm_zones.add(BEAM_ZONE)
+            why = f"{BEAM_NAME} beam during the alarm"
+            c.log("ALERT", f"Intrusion zone {BEAM_ZONE} (escalated): {why}", zone=BEAM_NAME, prio=2)
+            self.alarm_others(c, {BEAM_ZONE}, why)
+            return
+        if c.state != "ARMED":
+            if c.state in ("DISARMED", "MAINTENANCE"):
+                c.log("SENSOR" if c.state == "DISARMED" else "MAINT",
+                      "Motion (disarmed) - beam broken" if c.state == "DISARMED" else "Test trigger (beam broken)",
+                      zone=BEAM_NAME, prio=0)
+            return
+        c.beam_breaks = [t for t in c.beam_breaks if now - t < WINDOW] + [now]
+        c.hits[BEAM_ZONE] = now
+        busy = [x for x in self.in_alarm() if x is not c]
+        if busy:
+            self.confirm(c, {BEAM_ZONE}, f"{BEAM_NAME} beam while Module {busy[0].letter} is in alarm", BEAM_NAME)
+            return
+        if len(c.beam_breaks) >= BEAM_REPEATS:
+            self.confirm(c, {BEAM_ZONE}, f"{BEAM_NAME} beam broken x{len(c.beam_breaks)}", BEAM_NAME)
+            return
+        c.log("ALERT", f"Beam broken {len(c.beam_breaks)}/{BEAM_REPEATS}", zone=BEAM_NAME, prio=1)
+        if d.state == "ARMED":                          # the other end of wall C-D
+            d.seen_until = now + WINDOW
+            d.log("ALERT", "Beam broken, seen by Module C", zone=BEAM_NAME, prio=1)
+
     def scene(self) -> None:
         """Now and then something moves along a wall, or a radio link has a bad minute."""
         if random.random() < LINK_FAULT_CHANCE and not any(w == "fault" for _, w in self.down.values()):
@@ -606,6 +651,11 @@ class EmulatedGateway:
             return
         armed = [m for m in self.mods.values() if m.state == "ARMED"]
         if not armed:
+            return
+        if self.mods[BEAM_RX].state == "ARMED" and random.random() < BEAM_CHANCE:
+            self.beam_break()                           # someone along wall C-D ...
+            if random.random() < CONFIRM_CHANCE:        # ... who crosses back: the second break confirms
+                self.later.append((time.monotonic() + random.uniform(3, 9), self.beam_break))
             return
         m = random.choice(armed)
         zone = random.choice(PIRS[m.letter])
@@ -647,7 +697,7 @@ class EmulatedGateway:
                      f"TIME:{'Y' if self.time_base else 'N'},KPLOCK:0,PCLOCK:{max(0, int(self.locked_until - now))},"
                      f"LOGNO:{self.gw_no},WIFI:-51,CH:{self.channel},NET:{self.net_text('G')},FWD:{self.forwarded}"
                      + (f",CUT:{''.join(x for x in MODULES if self.test_cut('G', x))}"
-                        if any(self.test_cut("G", x) for x in MODULES) else "") + ",FW:6.0 (emulated)")
+                        if any(self.test_cut("G", x) for x in MODULES) else "") + ",FW:6.1 (emulated)")
                 self.send(kind, code=Node.GATEWAY, arg=self.unix(), text=g)
                 for letter, m in self.mods.items():
                     rssi = f",RSSI:{m.rssi + random.randint(-2, 2)}" if self.link_ok(letter, "G") else ""

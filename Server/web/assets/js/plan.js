@@ -15,7 +15,8 @@ const UNIT = {
 };
 const GATEWAY = { READY: ["armed", "Ready"], GW_TAMPER: ["tamper", "Lid open"], BOOT: ["starting", "Starting"] };
 const PIRS = ["A-Z2", "B-Z2", "A-Z1", "D-Z1", "B-Z3", "C-Z3"];
-const PIR_NAME = /[A-D]-Z[1-3]/g;
+const PIR_NAME = /[A-D]-Z[1-4]/g;             // C-Z4 = the beam on wall C-D, zone 4 (v6.1)
+const BEAM = { word: { OK: "intact", BRK: "broken", WARMUP: "looking for D", STUCK: "fault", NOSIG: "fault" } };
 const WARN_FOR = 20;                         // seconds a single trigger stays a warning (CORROBORATION_MS)
 
 // Box centres, and the path each link is drawn along (diagonals curve round the gateway)
@@ -113,12 +114,13 @@ export function renderPlan(st) {
     $(`#tag-${p}`).setAttribute("class", ["tag", s === "INTRUSION" && inAlarm ? "alarm" : s === "ARMED" && warn.has(p) ? "warn" : "",
       health === "STUCK" || health === "OFFLINE" ? "stuck" : ""].join(" ").trim());
   }
-  for (const z of [1, 2, 3]) {
+  renderBeam(nodes, gw, alarm, warn);
+  for (const z of [1, 2, 3, 4]) {
     $(`#wall-z${z}`).setAttribute("class", alarm.includes(z) ? "alarm" : "");
     $(`#dim-z${z}`).setAttribute("class", alarm.includes(z) ? "alarm" : "");
   }
   const buzz = sounding(nodes, alarm);
-  for (const k of ["A", "B"]) $(`#buzz-${k}`).setAttribute("class", `buzzer${buzz.includes(k) ? " on" : ""}`);
+  for (const k of MODULES) $(`#buzz-${k}`).setAttribute("class", `buzzer${buzz.includes(k) ? " on" : ""}`);
 
   // The mesh
   const links = meshLinks(nodes, gw);
@@ -152,7 +154,27 @@ export function renderPlan(st) {
   $("#tb-ch").textContent = g.CH ? `channel ${g.CH}` : "—";
 }
 
-/** A PIR's curtain flashes once when a new alert names it. */
+/** Zone 4, the beam on wall C-D: drawn from C's state, HIT and IR fields (IR: OK / BRK / WARMUP / STUCK / NOSIG). */
+function renderBeam(nodes, gw, alarm, warn) {
+  const c = nodes.C || {}, d = nodes.D || {};
+  const s = gw ? moduleState(c) : "unknown";
+  const ir = c.IR || "";
+  const bad = ir === "STUCK" || ir === "NOSIG";
+  const inAlarm = s === "INTRUSION" && alarm.includes(4);
+  let cls = "";
+  if (s === "ARMED") cls = warn.has("C-Z4") || ir === "BRK" ? "warn" : "on";
+  else if (s === "INTRUSION") cls = inAlarm ? "alarm" : "on";
+  else if (s === "MAINTENANCE") cls = "maint";
+  else if (s === "TAMPER_FAULT" || bad) cls = "fault";
+  if (ir === "BRK") cls += " broken";
+  $("#fan-C-Z4").setAttribute("class", `beam ${cls}`.trim());
+  $("#tag-C-Z4").setAttribute("class", ["tag", inAlarm ? "alarm" : s === "ARMED" && cls.includes("warn") ? "warn" : "",
+    bad ? "stuck" : ""].join(" ").trim());
+  $("#tag-D-IR").setAttribute("class", ["tag", gw && d.IR !== "TX" && moduleState(d) !== "unknown" ? "stuck" : ""].join(" ").trim());
+  $("#fan-C-Z4").setAttribute("aria-label", `Zone 4, IR beam on wall C-D: ${BEAM.word[ir] || ir || "unknown"}`);
+}
+
+/** A PIR's curtain (or the beam) flashes once when a new alert names it. */
 export function flashZone(event) {
   if (event.type !== "ALERT") return;
   const names = new Set(`${event.event} ${event.zone || ""}`.match(PIR_NAME) || []);
